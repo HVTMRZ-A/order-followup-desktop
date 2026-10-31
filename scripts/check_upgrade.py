@@ -22,7 +22,8 @@ def main():
     INSTALL.mkdir(parents=True,exist_ok=True)
     source=ROOT/"dist"/"OrderFollowup.exe"
     target=INSTALL/"OrderFollowup.exe"
-    shutil.copy2(source,target)
+    old_exe=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else source
+    shutil.copy2(old_exe,target)
     # 仅给测试副本添加尾部标记，确保前后哈希不同。
     with target.open("ab") as stream:stream.write(b"\nprevious-build-test-marker\n")
     old_hash=hashlib.sha256(target.read_bytes()).hexdigest()

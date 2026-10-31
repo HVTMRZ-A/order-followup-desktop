@@ -13,6 +13,7 @@ from workbench.importer import write_template
 
 def main():
     import os
+    destination=Path(os.environ.get('WORKBENCH_DIST',str(ROOT/'dist'))).resolve()
     os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QFontDatabase
@@ -34,8 +35,8 @@ def main():
     # Qt 6.12 使用 Windows 自带 ICU。不要把 PATH 中 Poppler/Conda 的
     # 同名 ICU DLL 打入包内，否则其带版本后缀的导出符号不兼容。
     spec.write_text(spec.read_text(encoding="utf-8").replace("pyz = PYZ(a.pure)","a.binaries = [entry for entry in a.binaries if entry[0].lower() not in {'icuuc.dll', 'icuin.dll', 'icudt78.dll'}]\npyz = PYZ(a.pure)"),encoding="utf-8")
-    subprocess.run([sys.executable,"-m","PyInstaller","--noconfirm","--clean",str(spec)],cwd=ROOT,check=True)
-    dist=ROOT/"dist";write_template(dist/"订单导入模板.xlsx")
+    subprocess.run([sys.executable,"-m","PyInstaller","--noconfirm","--clean","--distpath",str(destination),str(spec)],cwd=ROOT,check=True)
+    dist=destination;write_template(dist/"订单导入模板.xlsx")
     import shutil
     shutil.copy2(ROOT/"docs"/"使用说明.md",dist/"使用说明.md")
     shutil.copy2(ROOT/"THIRD_PARTY_NOTICES.md",dist/"THIRD_PARTY_NOTICES.md")

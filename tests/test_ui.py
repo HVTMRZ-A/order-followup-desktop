@@ -65,6 +65,17 @@ def test_orders_table_matches_plan_sheet(app,tmp_path,monkeypatch):
     assert w.home_table.columnCount()==len(HOME_COLUMNS)
     assert w.pack_table.columnCount()==len(PACKAGING_COLUMNS)
     assert w.parts_table.rowCount()==1 and w.pack_table.rowCount()==1
+    assert w.nav.count()==w.pages.count()==6
+    assert [w.nav.item(i).text() for i in range(w.nav.count())].count('计划总表')==1
+    assert '订单总表' not in [w.nav.item(i).text() for i in range(w.nav.count())]
+    w.nav.setCurrentRow(4);assert w.pages.currentWidget() is w.planbook_page
+    w.nav.setCurrentRow(1);assert w.pages.currentWidget() is w.order_management_page
+    from PySide6.QtCore import QTimer
+    # 跟进弹窗关闭后再次打开，已有订单和详情入口仍然可用。
+    for _ in range(2):
+        QTimer.singleShot(20,lambda:QApplication.activeModalWidget().reject())
+        w.open_order_actions()
+        assert w.orders_table.item(0,first).text()=='UI-003'
     w.quitting=True;w.close();w.timer.stop();w.tray.hide();s.db.close()
 
 

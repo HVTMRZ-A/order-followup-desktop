@@ -1,10 +1,16 @@
 import csv
+import base64
+import hashlib
+import io
 from datetime import datetime, date, time
 from pathlib import Path
 from .domain import new_order, new_item, number, fmt, validate_order
 
 HEADERS = ["订单号", "客户", "经办人", "接单日期", "型号", "产品数量", "要求交期", "合同号", "合同经办人", "销售订单号", "销售经办人", "备注"]
 MAPPING = dict(zip(HEADERS, ["number", "customer", "owner", "received_at", "model", "quantity", "delivery_date", "contract_no", "contract_owner", "sales_no", "sales_owner", "notes"]))
+ITEM_MAPPING={'物料编码':'material_code','物料代码':'material_code','料号':'material_code','产品要求':'requirement','规格型号':'requirement',
+              '产品大类':'category','客户型号':'customer_model','单位':'unit','包材':'packaging_name','BOM状态':'bom_status'}
+HEADERS += ['物料编码','产品大类','客户型号','单位','产品要求','包材','BOM状态']
 
 
 def date_value(value, with_time=False):
@@ -19,7 +25,7 @@ def date_value(value, with_time=False):
 
 def read_import(path, existing_numbers=()):
     path = Path(path)
-    if path.suffix.lower() == ".xlsx":
+    if path.suffix.lower() in (".xlsx",".xlsm"):
         from openpyxl import load_workbook
         book = load_workbook(path, read_only=True, data_only=True)
         try:
@@ -31,7 +37,7 @@ def read_import(path, existing_numbers=()):
             text = path.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError:
             text = path.read_text(encoding="gb18030")
-        rows = list(csv.reader(text.splitlines()))
+        rows = list(csv.reader(io.StringIO(text)))
     else:
         raise ValueError("支持 .xlsx 和 .csv 文件；旧版 .xls 请先另存为 .xlsx")
     if not rows:
@@ -39,6 +45,7 @@ def read_import(path, existing_numbers=()):
     if len(rows) > 10001:
         raise ValueError("每次最多导入 10000 行，请拆分文件")
     headers = [str(x or "").strip() for x in rows[0]]
+    headers=[{'公司型号':'型号','产品型号':'型号','数量':'产品数量'}.get(h,h) for h in headers]
     if len([h for h in headers if h]) != len(set(h for h in headers if h)):
         raise ValueError("表头存在重复列")
     for required in ("订单号", "型号", "产品数量"):
@@ -70,7 +77,14 @@ def read_import(path, existing_numbers=()):
                 order[key] = value
             if any(i["model"] == model for i in order["items"]):
                 raise ValueError(f"订单 {no} 型号 {model} 重复，请先合并数量")
-            order["items"].append(new_item(model, quantity))
+            item=new_item(model, quantity)
+            for h,v in zip(headers,row):
+                if h in ITEM_MAPPING and v is not None:
+                    key=ITEM_MAPPING[h];value=str(v).strip()
+                    if item.get(key) and item[key]!=value:raise ValueError(f'{h}与同类字段内容不一致')
+                    item[key]=value
+            item['source_columns']={h:str(v) if v is not None else '' for h,v in zip(headers,row) if h}
+            order["items"].append(item)
         except (ValueError, TypeError) as exc:
             errors.append(f"第 {index} 行：{exc}")
     if errors:
@@ -84,9 +98,14 @@ def read_any(path, existing_numbers=()):
     """自动识别文件类型：生产作业计划单 → 生产单解析；否则按导入模板解析。"""
     from .production import is_production_sheet, read_production
 
-    if is_production_sheet(path):
-        return read_production(path, existing_numbers)
-    return read_import(path, existing_numbers)
+    if is_production_sheet(path):orders=read_production(path, existing_numbers)
+    else:orders=read_import(path, existing_numbers)
+    blob=Path(path).read_bytes()
+    for order in orders:
+        order['source_file']=Path(path).name
+        order['source_sha256']=hashlib.sha256(blob).hexdigest()
+        order['source_original_b64']=base64.b64encode(blob).decode('ascii')
+    return orders
 
 
 def write_template(path):

@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import base64
 from datetime import datetime
 from pathlib import Path
 from .domain import stamp, validate_order
@@ -23,21 +24,51 @@ class Store:
         CREATE TABLE IF NOT EXISTS daily (day TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT, order_id TEXT, action TEXT);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS planbook (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, source BLOB NOT NULL);
         PRAGMA user_version=1;
         ''')
 
     def orders(self):
         return [json.loads(r[0]) for r in self.db.execute("SELECT payload FROM orders ORDER BY rowid DESC")]
 
-    def save_order(self, order, action="保存订单"):
-        self.save_orders([order], action)
+    def planbook(self):
+        row=self.db.execute('SELECT payload FROM planbook WHERE id=1').fetchone()
+        return json.loads(row[0]) if row else None
 
-    def save_orders(self, orders, action="批量导入"):
+    def planbook_source(self):
+        row=self.db.execute('SELECT source FROM planbook WHERE id=1').fetchone()
+        return row[0] if row else None
+
+    def save_planbook(self,payload,source=None):
+        with self.db:
+            if source is None:
+                self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(payload,ensure_ascii=False),))
+            else:
+                self.db.execute('INSERT INTO planbook VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,source=excluded.source',(json.dumps(payload,ensure_ascii=False),source))
+                for order in self.orders():
+                    order['plan_sync_checked']=False
+                    self.db.execute('UPDATE orders SET payload=? WHERE id=?',(json.dumps(order,ensure_ascii=False),order['id']))
+
+    def save_order(self, order, action="保存订单",require_plan_review=True):
+        self.save_orders([order], action,require_plan_review=require_plan_review)
+
+    def save_plan_join(self,payload,orders):
+        for order in orders:validate_order(order)
+        with self.db:
+            if payload is not None:
+                self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(payload,ensure_ascii=False),))
+            for order in orders:
+                order['updated_at']=stamp()
+                self.db.execute('UPDATE orders SET payload=? WHERE id=?',(json.dumps(order,ensure_ascii=False),order['id']))
+                self.db.execute('INSERT INTO audit(at,order_id,action) VALUES(?,?,?)',(stamp(),order['id'],'确认加入计划总表 / 更新待办'))
+
+    def save_orders(self, orders, action="批量导入",require_plan_review=True):
         for order in orders:
             validate_order(order)
         with self.db:
             for order in orders:
                 order["updated_at"] = stamp()
+                if require_plan_review:order['plan_sync_checked']=False
                 self.db.execute("INSERT INTO orders VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET number=excluded.number,payload=excluded.payload",
                                 (order["id"], order["number"], json.dumps(order, ensure_ascii=False)))
                 self.db.execute("INSERT INTO audit(at,order_id,action) VALUES(?,?,?)", (stamp(), order["id"], action))
@@ -76,6 +107,7 @@ class Store:
     def export_json(self, target):
         content = {"format": "order-followup-backup-v1", "orders": self.orders(), "daily": self.daily_all(),
                    "audit": list(self.db.execute("SELECT at,order_id,action FROM audit"))}
+        if self.planbook():content['planbook']={'payload':self.planbook(),'source':base64.b64encode(self.planbook_source()).decode('ascii')}
         Path(target).write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def restore_json(self, target):
@@ -93,10 +125,16 @@ class Store:
             if not isinstance(payload, dict):
                 raise ValueError("每日记录格式无效")
         backup = self.backup()
+        ledger=content.get('planbook')
+        if ledger:
+            if not isinstance(ledger['payload'].get('sheets'),list):raise ValueError('计划总表备份格式无效')
+            ledger_source=base64.b64decode(ledger['source'],validate=True)
         with self.db:
             self.db.execute("DELETE FROM orders")
             self.db.execute("DELETE FROM daily")
             self.db.execute("DELETE FROM audit")
+            self.db.execute('DELETE FROM planbook')
+            if ledger:self.db.execute('INSERT INTO planbook VALUES(1,?,?)',(json.dumps(ledger['payload'],ensure_ascii=False),ledger_source))
             for order in content["orders"]:
                 self.db.execute("INSERT INTO orders VALUES(?,?,?)", (order["id"], order["number"], json.dumps(order, ensure_ascii=False)))
             for day, payload in content["daily"]:

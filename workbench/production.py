@@ -156,9 +156,9 @@ def is_production_sheet(path):
     if Path(path).suffix.lower() not in (".xlsx", ".xlsm"):
         return False
     try:
-        for _, rows in _scan_rows(path, limit=40):
+        for _, rows in _scan_rows(path, limit=200,max_col=300):
             for row in rows:
-                if _header_map(row):
+                if _header_map(row) and '订单号' not in [_text(v) for v in row]:
                     return True
     except Exception:
         return False
@@ -240,8 +240,18 @@ def read_production(path, existing_numbers=()):
     if path.suffix.lower() not in (".xlsx", ".xlsm"):
         raise ValueError("生产单请使用 .xlsx 格式；旧版 .xls 请先另存为 .xlsx")
 
+    from .planbook import read_planbook
+    from openpyxl.utils.cell import coordinate_to_tuple
+    snapshot,_=read_planbook(path)
+    grids=[]
+    for sheet in snapshot['sheets']:
+        if sheet['rows']>10000:raise ValueError('生产单超过 10000 行，请拆分；未执行截断导入。')
+        rows=[['']*sheet['cols'] for _ in range(sheet['rows'])]
+        for address,cell in sheet['cells'].items():
+            r,c=coordinate_to_tuple(address);rows[r-1][c-1]=cell.get('v')
+        grids.append((sheet['name'],rows))
     warnings = []
-    for sheet_name, rows in _scan_rows(path, limit=200):
+    for sheet_name, rows in grids:
         header_row = next((i for i, row in enumerate(rows) if _header_map(row)), None)
         if header_row is None:
             continue
@@ -264,6 +274,7 @@ def read_production(path, existing_numbers=()):
                 warnings.append(f"第 {row_index + 1} 行数量为 {fmt(quantity)}，已跳过")
                 continue
             item = dict(model=model, quantity=fmt(quantity))
+            item['source_columns']={str(h).strip():_raw(v) for h,v in zip(rows[header_row],row) if h is not None and str(h).strip()}
             for field, index in columns.items():
                 if field in ("model", "quantity") or index >= len(row):
                     continue
@@ -333,11 +344,13 @@ def _build_order(path, sheet_name, titles, head, items, warnings, existing_numbe
         if key in seen:
             target = seen[key]
             target["quantity"] = fmt(Decimal(target["quantity"]) + Decimal(item["quantity"]))
+            target.setdefault('source_rows',[]).append(item.get('source_columns',{}))
             warnings.append(f"型号 {item['model']} 出现多行，已合并数量")
             continue
         new = new_item(item["model"], item["quantity"])
         new.update({k: v for k, v in item.items() if k not in ("model", "quantity")})
         new["id"] = uid()
+        new['source_rows']=[item.get('source_columns',{})]
         seen[key] = new
         merged.append(new)
     order["items"] = merged
