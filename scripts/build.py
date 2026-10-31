@@ -16,12 +16,12 @@ def main():
     os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QFontDatabase
-    from workbench.ui import icon
+    from workbench.theme import app_icon
     from PIL import Image
     app=QApplication.instance() or QApplication([])
     QFontDatabase.addApplicationFont(str(Path(os.environ.get("WINDIR","C:/Windows"))/"Fonts"/"msyhbd.ttc"))
     generated=ROOT/"build";generated.mkdir(exist_ok=True)
-    icon().pixmap(64,64).save(str(generated/"app.png"))
+    app_icon().pixmap(64,64).save(str(generated/"app.png"))
     Image.open(generated/"app.png").save(generated/"app.ico",sizes=[(16,16),(32,32),(48,48),(64,64)])
     # Conda 可能提供较旧的 VC runtime。让根目录使用 Qt wheel 配套运行库，
     # 避免 Python 先加载旧 DLL 后造成 QtWidgets 导入失败。

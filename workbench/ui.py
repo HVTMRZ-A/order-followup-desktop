@@ -1,468 +1,1349 @@
 import copy
-import json
-import os
 import sys
-from datetime import date, datetime
-from pathlib import Path
-from PySide6.QtCore import Qt, QDate, QDateTime, QTimer, QThread, Signal, QUrl
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QDesktopServices, QAction
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QDialog, QDialogButtonBox, QFormLayout, QTabWidget, QTextEdit, QCheckBox, QDateEdit, QDateTimeEdit,
-    QFileDialog, QMessageBox, QListWidget, QStackedWidget, QFrame, QGridLayout, QSystemTrayIcon, QMenu)
-from . import VERSION, APP_NAME, REPOSITORY
-from .domain import new_order, new_item, uid, validate_order, demand, fmt, reminders, all_checked, progress, confirm_all
-from .storage import Store, data_dir
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+
+from PySide6.QtCore import QDate, QDateTime, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFontMetrics, QIcon
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
+                               QDateEdit, QDateTimeEdit, QDialog, QFileDialog,
+                               QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
+                               QMessageBox, QPushButton, QStackedWidget, QSystemTrayIcon, QTableWidget,
+                               QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget)
+
+from . import APP_NAME, REPOSITORY, VERSION, updater
+from .domain import (all_checked, confirm_all, demand, fmt, new_item, new_order, progress,
+                     reminders, uid, validate_order)
 from .importer import read_import, write_template
-from . import updater
+from .storage import Store, data_dir
+from .theme import (ACCENT, DANGER, FAINT, INK, INK_SOFT, LINE, MUTED, STYLE, SUCCESS, WARN,
+                    BadgeDelegate, ProgressDelegate, StatusDelegate, app_icon, brand_mark, icon, pixmap)
 
-STYLE = '''
-QWidget { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #26364b; }
-QMainWindow, QDialog { background: #f4f6fa; }
-QLabel#title { font-size: 25px; font-weight: 600; color: #142a45; }
-QLabel#muted { color: #718096; }
-QLabel#stat { font-size: 30px; font-weight: 600; color: #173d69; }
-QFrame#card { background: white; border: 1px solid #e4e9f1; border-radius: 10px; }
-QListWidget#nav { background: #142a45; color: #bccadd; border: none; padding: 12px 8px; font-size: 15px; }
-QListWidget#nav::item { padding: 15px 14px; margin: 3px 2px; border-radius: 6px; }
-QListWidget#nav::item:selected { background: #285780; color: white; }
-QPushButton { background: white; border: 1px solid #d6dfeb; border-radius: 6px; padding: 8px 15px; }
-QPushButton:hover { background: #edf4ff; border-color: #8eafdb; }
-QPushButton#primary { background: #2266ae; color: white; border-color: #2266ae; }
-QPushButton#primary:hover { background: #1a5594; }
-QPushButton:disabled { color: #97a4b4; background: #edf0f4; }
-QLineEdit, QComboBox, QDateEdit, QDateTimeEdit, QTextEdit { background: white; border: 1px solid #d6dfeb; border-radius: 5px; padding: 7px; selection-background-color: #2266ae; }
-QTableWidget { background: white; alternate-background-color: #f8fafd; border: 1px solid #e0e6ef; border-radius: 6px; gridline-color: #edf0f5; selection-background-color: #e4effe; selection-color: #173d69; }
-QHeaderView::section { background: #edf2f8; color: #53677e; padding: 10px 8px; border: none; border-bottom: 1px solid #dce4ef; font-weight: 600; }
-QTabWidget::pane { background: white; border: 1px solid #dce4ef; border-radius: 5px; }
-QTabBar::tab { padding: 11px 18px; background: #edf2f8; }
-QTabBar::tab:selected { background: white; color: #2266ae; }
-QCheckBox { spacing: 7px; padding: 4px; }
-QCheckBox::indicator { width: 17px; height: 17px; }
-QStatusBar { background: #eaf0f7; color: #64748b; }
-'''
+NAV = [("今日待办", "dashboard"), ("订单总表", "orders"), ("包材跟进", "package"),
+       ("每日跟进", "daily"), ("设置与更新", "gear")]
 
 
-def icon():
-    pix = QPixmap(64, 64); pix.fill(Qt.GlobalColor.transparent)
-    paint = QPainter(pix); paint.setRenderHint(QPainter.RenderHint.Antialiasing)
-    paint.setPen(Qt.PenStyle.NoPen); paint.setBrush(QColor("#2266ae")); paint.drawRoundedRect(0, 0, 64, 64, 14, 14)
-    paint.setPen(QColor("white")); paint.setFont(QFont("Microsoft YaHei UI", 27, QFont.Weight.Bold)); paint.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "单"); paint.end()
-    return QIcon(pix)
+# ------------------------------------------------------------------ 基础控件
+def label(text, name=None, wrap=True):
+    widget = QLabel(text)
+    widget.setWordWrap(wrap)
+    if name:
+        widget.setObjectName(name)
+    return widget
 
 
-def button(text, callback, primary=False):
-    b = QPushButton(text)
-    if primary: b.setObjectName("primary")
-    b.clicked.connect(callback)
-    return b
+def button(text, callback, kind=None, icon_name=None, tint=None):
+    widget = QPushButton(text)
+    if kind:
+        widget.setObjectName(kind)
+    if icon_name:
+        color = tint or ("#ffffff" if kind == "primary" else INK_SOFT)
+        widget.setIcon(icon(icon_name, color, 15))
+    widget.setCursor(Qt.CursorShape.PointingHandCursor)
+    widget.clicked.connect(callback)
+    return widget
 
 
-def label(text, name=None):
-    w = QLabel(text); w.setWordWrap(True)
-    if name: w.setObjectName(name)
-    return w
+def ghost_row(*widgets, gap=8, stretch=True):
+    layout = QHBoxLayout()
+    layout.setSpacing(gap)
+    for widget in widgets:
+        layout.addWidget(widget)
+    if stretch:
+        layout.addStretch(1)
+    return layout
 
 
-def table(headers):
-    t = QTableWidget(0, len(headers)); t.setHorizontalHeaderLabels(headers)
-    t.setAlternatingRowColors(True); t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-    t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-    t.verticalHeader().hide(); t.verticalHeader().setDefaultSectionSize(43)
-    t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-    t.horizontalHeader().setStretchLastSection(True)
-    return t
+def dialog_footer(on_cancel, on_confirm, confirm_text="保存"):
+    """对话框底部：左下提示 + 右侧「取消 / 保存」。"""
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    row.addStretch(1)
+    cancel = button("取消", on_cancel)
+    confirm = button(confirm_text, on_confirm, "primary")
+    for item in (cancel, confirm):
+        item.setMinimumWidth(86)
+        row.addWidget(item)
+    return row
 
 
-def put(t, row, values, identity=None):
-    t.insertRow(row)
-    for col, value in enumerate(values):
-        item = QTableWidgetItem(str(value)); item.setToolTip(str(value)); item.setData(Qt.ItemDataRole.UserRole, identity)
-        t.setItem(row, col, item)
+def panel(table_widget, title="", meta=""):
+    """把表格包进卡片，带可选的小标题和右侧说明。"""
+    frame = QFrame()
+    frame.setObjectName("card")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(6, 0, 6, 8)
+    layout.setSpacing(0)
+    meta_label = None
+    if title:
+        header = QHBoxLayout()
+        header.setContentsMargins(14, 13, 10, 8)
+        header.setSpacing(8)
+        header.addWidget(label(title, "section", False))
+        header.addStretch(1)
+        meta_label = label(meta, "meta", False)
+        header.addWidget(meta_label)
+        layout.addLayout(header)
+    layout.addWidget(table_widget, 1)
+    return frame, meta_label
+
+
+def shadow(widget, blur=24, dy=3, alpha=24):
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(blur)
+    effect.setOffset(0, dy)
+    effect.setColor(QColor(23, 43, 77, alpha))
+    widget.setGraphicsEffect(effect)
+
+
+def chip(icon_name, tint, background, size=38):
+    holder = QLabel()
+    holder.setFixedSize(size, size)
+    holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    holder.setStyleSheet(f"background:{background}; border-radius:{size // 3}px;")
+    holder.setPixmap(pixmap(icon_name, tint, int(size * 0.52)))
+    return holder
+
+
+def field_row(layout, entries, gap=18):
+    line = QHBoxLayout()
+    line.setSpacing(gap)
+    for entry in entries:
+        if entry is None:
+            line.addStretch(1)
+            continue
+        title, widget = entry
+        box = QVBoxLayout()
+        box.setSpacing(6)
+        box.addWidget(label(title, "fieldLabel", False))
+        box.addWidget(widget)
+        line.addLayout(box, 1)
+    layout.addLayout(line)
+    return line
+
+
+def table(headers, widths=None, stretch=None, height=40, right=()):
+    widget = QTableWidget(0, len(headers))
+    widget.setHorizontalHeaderLabels(headers)
+    widget.setAlternatingRowColors(False)
+    widget.setShowGrid(True)
+    widget.setWordWrap(False)
+    widget.setFrameShape(QFrame.Shape.NoFrame)
+    widget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    widget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    widget.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    widget.verticalHeader().hide()
+    widget.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+    widget.verticalHeader().setDefaultSectionSize(height)
+    header = widget.horizontalHeader()
+    header.setHighlightSections(False)
+    header.setStretchLastSection(False)
+    header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    header.setFixedHeight(36)
+    header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+    if widths:
+        for column, width in enumerate(widths):
+            if width:
+                header.resizeSection(column, width)
+    if stretch is not None:
+        header.setSectionResizeMode(stretch, QHeaderView.ResizeMode.Stretch)
+    for column in right:
+        item = widget.horizontalHeaderItem(column)
+        if item is not None:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    widget.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+    return widget
+
+
+def put(widget, row, values, identity=None):
+    widget.insertRow(row)
+    for column, value in enumerate(values):
+        item = QTableWidgetItem(str(value))
+        item.setToolTip(str(value))
+        item.setData(Qt.ItemDataRole.UserRole, identity)
+        widget.setItem(row, column, item)
+
+
+def align_numbers(widget, row, columns):
+    for column in columns:
+        item = widget.item(row, column)
+        if item is not None:
+            item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
 
 def date_field(value="", optional=False):
     if optional:
-        w = QLineEdit(value); w.setPlaceholderText("YYYY-MM-DD（可留空）"); return w
-    w = QDateEdit(); w.setCalendarPopup(True); w.setDisplayFormat("yyyy-MM-dd")
-    w.setDate(QDate.fromString(value, "yyyy-MM-dd") if value else QDate.currentDate()); return w
+        widget = QLineEdit(value)
+        widget.setPlaceholderText("YYYY-MM-DD（可留空）")
+        return widget
+    widget = QDateEdit()
+    widget.setCalendarPopup(True)
+    widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    widget.setDisplayFormat("yyyy-MM-dd")
+    widget.setDate(QDate.fromString(value, "yyyy-MM-dd") if value else QDate.currentDate())
+    return widget
 
 
+def rule_row(text):
+    layout = QHBoxLayout()
+    layout.setSpacing(9)
+    dot = QLabel()
+    dot.setFixedSize(16, 16)
+    dot.setPixmap(pixmap("check", ACCENT, 13, 2.4))
+    layout.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
+    layout.addWidget(label(text, "muted"), 1)
+    return layout
+
+
+# ------------------------------------------------------------------ 对话框
 class ItemDialog(QDialog):
     def __init__(self, item, parent):
-        super().__init__(parent); self.setWindowTitle("型号与确认项"); self.resize(460, 410); self.item = copy.deepcopy(item)
-        layout = QVBoxLayout(self); form = QFormLayout(); layout.addLayout(form)
-        self.model = QLineEdit(item["model"]); self.qty = QLineEdit(item["quantity"])
-        form.addRow("产品型号 *", self.model); form.addRow("产品数量 *", self.qty)
+        super().__init__(parent)
+        self.setWindowTitle("型号与确认项")
+        self.resize(520, 420)
+        self.setMinimumWidth(480)
+        self.item = copy.deepcopy(item)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 22, 26, 20)
+        root.setSpacing(0)
+        root.addWidget(label("型号与确认项", "dialogTitle", False))
+        root.addSpacing(5)
+        root.addWidget(label("勾选会立即改变待办与优先级；分析日期用于计算包材信息的 10 天期限。", "hint"))
+        root.addSpacing(18)
+
+        self.model = QLineEdit(item["model"])
+        self.model.setPlaceholderText("例如 LF3000-A")
+        self.qty = QLineEdit(item["quantity"])
+        field_row(root, [("产品型号 *", self.model), ("产品数量 *", self.qty)])
+        root.addSpacing(14)
+
         self.flags = {}
-        for key, title in [("bom", "工程 BOM 已匹配"), ("analyzed", "分析已完成"), ("packaging", "包材信息已确认"), ("completed", "该型号跟进完成")]:
-            w = QCheckBox(title); w.setChecked(item.get(key, False)); form.addRow(w); self.flags[key] = w
-        self.analysis_date = date_field(item.get("analysis_at", "")); form.addRow("分析日期", self.analysis_date)
-        layout.addWidget(label("勾选分析完成后，包材信息的 10 天期限从此日期计算。", "muted"))
-        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        box.accepted.connect(self.accept); box.rejected.connect(self.reject); layout.addWidget(box)
+        flags_grid = QHBoxLayout()
+        flags_grid.setSpacing(18)
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        right_box = QVBoxLayout()
+        right_box.setSpacing(10)
+        for index, (key, title) in enumerate([("bom", "工程 BOM 已匹配"), ("analyzed", "分析已完成"),
+                                              ("packaging", "包材信息已确认"), ("completed", "该型号跟进完成")]):
+            box = QCheckBox(title)
+            box.setChecked(item.get(key, False))
+            (left if index % 2 == 0 else right_box).addWidget(box)
+            self.flags[key] = box
+        flags_grid.addLayout(left, 1)
+        flags_grid.addLayout(right_box, 1)
+        root.addLayout(flags_grid)
+        root.addSpacing(16)
+
+        self.analysis_date = date_field(item.get("analysis_at", ""))
+        field_row(root, [("分析日期", self.analysis_date), None])
+        root.addSpacing(8)
+        root.addWidget(label("勾选“分析已完成”后，包材信息的 10 天期限从该日期开始计算。", "hint"))
+        root.addStretch(1)
+        root.addLayout(dialog_footer(self.reject, self.accept, "保存型号"))
 
     def value(self):
         self.item.update(model=self.model.text().strip(), quantity=self.qty.text().strip())
-        self.item.update({key:w.isChecked() for key,w in self.flags.items()})
+        self.item.update({key: widget.isChecked() for key, widget in self.flags.items()})
         self.item["analysis_at"] = self.analysis_date.date().toString("yyyy-MM-dd") if self.item["analyzed"] else ""
         return self.item
 
 
 class MaterialDialog(QDialog):
     def __init__(self, order, material, parent):
-        super().__init__(parent); self.setWindowTitle("包材请购与到料"); self.resize(560, 640)
-        self.order = order; self.material = copy.deepcopy(material or dict(id=uid(), name="", usage="1", arrived="0"))
-        layout = QVBoxLayout(self); form = QFormLayout(); layout.addLayout(form)
+        super().__init__(parent)
+        self.setWindowTitle("包材请购与到料")
+        self.resize(680, 640)
+        self.setMinimumWidth(620)
+        self.order = order
+        self.material = copy.deepcopy(material or dict(id=uid(), name="", usage="1", arrived="0"))
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 22, 26, 20)
+        root.setSpacing(0)
+        root.addWidget(label("包材请购与到料", "dialogTitle", False))
+        root.addSpacing(5)
+        root.addWidget(label("请购数量按产品数量 × 单件用量自动计算，不扣库存。", "hint"))
+        root.addSpacing(18)
+
         self.model = QComboBox()
-        for item in order["items"]: self.model.addItem(f"{item['model']}（产品数量 {item['quantity']}）", item["id"])
-        self.model.setCurrentIndex(max(0,self.model.findData(self.material.get("item_id"))))
-        form.addRow("关联型号", self.model); self.fields = {}
-        for key, title, default in [("name", "包材名称 *", ""), ("usage", "单个产品使用量 *", "1"), ("unit", "计量单位", "个"),
-                                    ("request_no", "请购单号", ""), ("request_date", "请购日期", ""), ("buyer", "采购经办人", ""),
-                                    ("due_date", "预计到料日期", ""), ("remind_date", "提醒日期", ""), ("arrived", "累计已到数量", "0"),
-                                    ("arrival_date", "最近实际到料日期", ""), ("notes", "跟进记录 / 备注", "")]:
-            w = QLineEdit(str(self.material.get(key, default))); self.fields[key] = w
-            if "date" in key: w.setPlaceholderText("YYYY-MM-DD（可留空）")
-            form.addRow(title, w)
-        self.calculation = label(""); layout.addWidget(self.calculation)
-        layout.addWidget(label("请购数量 = 产品数量 × 单件包材用量，不扣库存。提醒日期留空时使用预计到料日期，提醒时间固定为 09:00。到齐后自动停止该包材提醒。", "muted"))
-        self.model.currentIndexChanged.connect(self.calculate); self.fields["usage"].textChanged.connect(self.calculate); self.calculate()
-        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        box.accepted.connect(self.save); box.rejected.connect(self.reject); layout.addWidget(box)
+        for item in order["items"]:
+            self.model.addItem(f"{item['model']}（产品数量 {item['quantity']}）", item["id"])
+        self.model.setCurrentIndex(max(0, self.model.findData(self.material.get("item_id"))))
+
+        self.fields = {}
+        specs = [("name", "包材名称 *", "", None), ("usage", "单个产品使用量 *", "1", None),
+                 ("unit", "计量单位", "个", None), ("request_no", "请购单号", "", None),
+                 ("request_date", "请购日期", "", "YYYY-MM-DD"), ("buyer", "采购经办人", "", None),
+                 ("due_date", "预计到料日期", "", "YYYY-MM-DD"), ("remind_date", "提醒日期（09:00）", "", "YYYY-MM-DD"),
+                 ("arrived", "累计已到数量", "0", None), ("arrival_date", "最近实际到料日期", "", "YYYY-MM-DD")]
+        for key, title, default, placeholder in specs:
+            widget = QLineEdit(str(self.material.get(key, default)))
+            if placeholder:
+                widget.setPlaceholderText("YYYY-MM-DD（可留空）")
+            self.fields[key] = widget
+
+        field_row(root, [("关联型号", self.model), ("包材名称 *", self.fields["name"])])
+        root.addSpacing(14)
+        field_row(root, [("单个产品使用量 *", self.fields["usage"]), ("计量单位", self.fields["unit"])])
+        root.addSpacing(14)
+        field_row(root, [("请购单号", self.fields["request_no"]), ("请购日期", self.fields["request_date"])])
+        root.addSpacing(14)
+        field_row(root, [("采购经办人", self.fields["buyer"]), ("预计到料日期", self.fields["due_date"])])
+        root.addSpacing(14)
+        field_row(root, [("提醒日期（09:00）", self.fields["remind_date"]), ("累计已到数量", self.fields["arrived"])])
+        root.addSpacing(14)
+        field_row(root, [("最近实际到料日期", self.fields["arrival_date"]), None])
+        root.addSpacing(14)
+
+        self.calculation = label("")
+        calc_box = QFrame()
+        calc_box.setObjectName("inner")
+        calc_layout = QHBoxLayout(calc_box)
+        calc_layout.setContentsMargins(14, 11, 14, 11)
+        calc_layout.addWidget(chip("package", ACCENT, "#eaf1fe", 30))
+        calc_layout.addWidget(self.calculation, 1)
+        root.addWidget(calc_box)
+
+        root.addSpacing(14)
+        notes = self.fields.setdefault("notes", QLineEdit(str(self.material.get("notes", ""))))
+        notes.setPlaceholderText("跟进记录 / 备注：异常、承诺时间、联系人……")
+        field_row(root, [("跟进记录 / 备注", notes)])
+        root.addSpacing(10)
+        root.addWidget(label("提醒日期留空时使用预计到料日期；到齐后自动停止该包材提醒。", "hint"))
+        root.addStretch(1)
+
+        self.model.currentIndexChanged.connect(self.calculate)
+        self.fields["usage"].textChanged.connect(self.calculate)
+        self.calculate()
+        root.addLayout(dialog_footer(self.reject, self.save))
 
     def calculate(self):
         try:
             material = dict(item_id=self.model.currentData(), usage=self.fields["usage"].text())
-            qty = demand(self.order, material)
-            self.calculation.setText(f"本型号所需请购数量：{fmt(qty)}")
-        except Exception: self.calculation.setText("请填写有效的单件用量")
+            quantity = demand(self.order, material)
+            self.calculation.setText(f"本型号所需请购数量：<b>{fmt(quantity)}</b> {self.fields['unit'].text().strip()}")
+        except Exception:
+            self.calculation.setText("请填写有效的单件用量")
 
     def save(self):
-        self.material.update({k:w.text().strip() for k,w in self.fields.items()}); self.material["item_id"] = self.model.currentData()
+        self.material.update({key: widget.text().strip() for key, widget in self.fields.items()})
+        self.material["item_id"] = self.model.currentData()
         try:
-            test = copy.deepcopy(self.order); test["materials"] = [self.material]; validate_order(test)
-        except Exception as exc: QMessageBox.warning(self, "请检查", str(exc)); return
+            test = copy.deepcopy(self.order)
+            test["materials"] = [self.material]
+            validate_order(test)
+        except Exception as exc:
+            QMessageBox.warning(self, "请检查", str(exc))
+            return
         self.accept()
 
 
 class OrderDialog(QDialog):
     def __init__(self, store, order=None, parent=None):
-        super().__init__(parent); self.store = store; self.order = copy.deepcopy(order or new_order()); self.saved = False
-        self.setWindowTitle("订单详情" if order else "登记新订单"); self.resize(1040, 770)
-        self.setMinimumSize(840, 630)
-        root = QVBoxLayout(self); root.setContentsMargins(22, 18, 22, 18)
-        root.addWidget(label("订单登记与跟进", "title")); tabs = QTabWidget(); root.addWidget(tabs)
-        basic = QWidget(); form = QFormLayout(basic); form.setContentsMargins(22,22,22,22); form.setSpacing(12); self.fields = {}
-        for key, title in [("number", "订单号 *"), ("customer", "客户"), ("owner", "订单经办人"), ("delivery_date", "要求交期"),
-                           ("contract_no", "合同号"), ("contract_owner", "合同经办人"), ("sales_no", "销售订单号"), ("sales_owner", "销售订单经办人")]:
-            w = QLineEdit(self.order.get(key,"")); self.fields[key] = w; form.addRow(title,w)
-            if key == "delivery_date": w.setPlaceholderText("YYYY-MM-DD（可留空）")
-        self.received = QDateTimeEdit(); self.received.setCalendarPopup(True); self.received.setDisplayFormat("yyyy-MM-dd HH:mm")
-        self.received.setDateTime(QDateTime.fromString(self.order["received_at"],Qt.DateFormat.ISODate)); form.addRow("接单时间", self.received)
-        self.contract = QCheckBox("合同已录入并确认"); self.contract.setChecked(self.order.get("contract",False)); form.addRow(self.contract)
-        form.addRow(label("合同号、销售订单号各自关联到此订单及填写的经办人。", "muted")); tabs.addTab(basic,"基本信息 / 合同")
-        items_page = QWidget(); il = QVBoxLayout(items_page); il.setContentsMargins(16,16,16,16)
-        il.addWidget(label("整单操作会应用到当前全部型号；双击型号可单独确认或撤销。新增型号需重新确认。", "muted"))
-        row = QHBoxLayout()
-        for key, title in [("bom","整单 BOM 确认"),("analyzed","整单分析确认"),("packaging","整单包材信息确认"),("completed","整单跟进完成")]:
-            row.addWidget(button(title,lambda checked=False,k=key:self.bulk(k)))
-        il.addLayout(row)
-        self.items = table(["型号","产品数量","BOM","分析","分析日期","包材信息","跟进完成"]); il.addWidget(self.items)
-        row = QHBoxLayout(); row.addWidget(button("＋ 添加型号", self.add_item)); row.addWidget(button("编辑所选型号", self.edit_item)); row.addWidget(button("移除所选型号",self.remove_item)); row.addStretch(); il.addLayout(row)
-        self.items.cellDoubleClicked.connect(lambda *_:self.edit_item()); tabs.addTab(items_page,"型号与确认项")
-        materials_page = QWidget(); ml = QVBoxLayout(materials_page); ml.setContentsMargins(16,16,16,16)
-        ml.addWidget(label("按型号登记包材，用量修改后自动重新计算请购数量。不同型号的同名包材分别保留。", "muted"))
-        self.materials = table(["型号","包材","单件用量","请购数量","已到数量","交期","提醒日"]); ml.addWidget(self.materials)
-        row = QHBoxLayout(); row.addWidget(button("＋ 添加包材",self.add_material)); row.addWidget(button("编辑交期 / 到料",self.edit_material)); row.addWidget(button("移除所选包材",self.remove_material)); row.addStretch(); ml.addLayout(row)
-        self.materials.cellDoubleClicked.connect(lambda *_:self.edit_material()); tabs.addTab(materials_page,"包材请购与到料")
-        notes_page = QWidget(); nl = QVBoxLayout(notes_page); self.notes = QTextEdit(self.order.get("notes","")); self.notes.setPlaceholderText("记录异常、处理进展或下次跟进事项……"); nl.addWidget(self.notes)
-        history = QTextEdit(); history.setReadOnly(True); history.setMaximumHeight(180); history.setPlainText("\n".join(f"{at}  {action}" for at,action in store.history(self.order["id"])))
-        nl.addWidget(label("保存历史", "muted")); nl.addWidget(history); tabs.addTab(notes_page,"跟进记录")
-        footer = QHBoxLayout(); footer.addWidget(label("修改将在点击“保存订单”后生效。", "muted"),1); footer.addWidget(button("取消",self.reject)); footer.addWidget(button("保存订单",self.save,True)); root.addLayout(footer)
+        super().__init__(parent)
+        self.store = store
+        self.order = copy.deepcopy(order or new_order())
+        self.saved = False
+        self.setWindowTitle("订单详情" if order else "登记新订单")
+        self.resize(1040, 720)
+        self.setMinimumSize(880, 650)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 22, 26, 18)
+        root.setSpacing(0)
+        root.addWidget(label("订单登记与跟进" if order else "登记新订单", "dialogTitle", False))
+        root.addSpacing(5)
+        root.addWidget(label("整单确认会应用到当前全部型号；新增型号不继承先前确认。", "hint"))
+        root.addSpacing(14)
+
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.tabBar().setExpanding(False)
+        tabs.tabBar().setDrawBase(False)
+        root.addWidget(tabs, 1)
+
+        # ---- 基本信息 / 合同
+        basic = QWidget()
+        form = QVBoxLayout(basic)
+        form.setContentsMargins(22, 20, 22, 20)
+        form.setSpacing(14)
+        self.fields = {}
+        for key, title, placeholder in [("number", "订单号 *", "例如 SO-2026-001"), ("customer", "客户", ""),
+                                        ("owner", "订单经办人", ""), ("delivery_date", "要求交期", "YYYY-MM-DD（可留空）"),
+                                        ("contract_no", "合同号", ""), ("contract_owner", "合同经办人", ""),
+                                        ("sales_no", "销售订单号", ""), ("sales_owner", "销售订单经办人", "")]:
+            widget = QLineEdit(self.order.get(key, ""))
+            if placeholder:
+                widget.setPlaceholderText(placeholder)
+            self.fields[key] = widget
+        field_row(form, [("订单号 *", self.fields["number"]), ("客户", self.fields["customer"])])
+        field_row(form, [("订单经办人", self.fields["owner"]), ("要求交期", self.fields["delivery_date"])])
+        field_row(form, [("合同号", self.fields["contract_no"]), ("合同经办人", self.fields["contract_owner"])])
+        field_row(form, [("销售订单号", self.fields["sales_no"]), ("销售订单经办人", self.fields["sales_owner"])])
+
+        self.received = QDateTimeEdit()
+        self.received.setCalendarPopup(True)
+        self.received.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self.received.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.received.setDateTime(QDateTime.fromString(self.order["received_at"], Qt.DateFormat.ISODate))
+        field_row(form, [("接单时间", self.received), None])
+
+        contract_box = QFrame()
+        contract_box.setObjectName("inner")
+        contract_layout = QHBoxLayout(contract_box)
+        contract_layout.setContentsMargins(14, 10, 14, 10)
+        self.contract = QCheckBox("合同已录入并确认")
+        self.contract.setChecked(self.order.get("contract", False))
+        contract_layout.addWidget(self.contract)
+        contract_layout.addStretch(1)
+        contract_layout.addWidget(label("接单满 24 小时未确认将提升优先级", "hint", False))
+        form.addWidget(contract_box)
+        form.addWidget(label("合同号、销售订单号各自关联到此订单及填写的经办人。", "hint"))
+        form.addStretch(1)
+        tabs.addTab(basic, "基本信息 / 合同")
+
+        # ---- 型号与确认项
+        items_page = QWidget()
+        items_layout = QVBoxLayout(items_page)
+        items_layout.setContentsMargins(22, 20, 22, 20)
+        items_layout.setSpacing(12)
+        bulk = QHBoxLayout()
+        bulk.setSpacing(8)
+        for key, title in [("bom", "整单 BOM"), ("analyzed", "整单分析"), ("packaging", "整单包材"), ("completed", "整单完成")]:
+            bulk.addWidget(button(title, lambda checked=False, k=key: self.bulk(k), "tool"))
+        bulk.addStretch(1)
+        bulk.addWidget(label("整单操作应用到全部型号", "hint", False))
+        items_layout.addLayout(bulk)
+        self.items = table(["型号", "产品数量", "BOM", "分析", "分析日期", "包材信息", "跟进完成"],
+                           widths=[200, 104, 96, 96, 124, 112, 108], stretch=0, right=(1,))
+        for column in (2, 3, 5, 6):
+            self.items.setItemDelegateForColumn(column, StatusDelegate(self.items))
+        items_frame, _ = panel(self.items, "型号明细", "双击型号单独编辑")
+        items_layout.addWidget(items_frame, 1)
+        items_layout.addLayout(ghost_row(button("添加型号", self.add_item, "primary", "plus"),
+                                         button("编辑所选型号", self.edit_item),
+                                         button("移除所选型号", self.remove_item, "danger")))
+        self.items.cellDoubleClicked.connect(lambda *_: self.edit_item())
+        tabs.addTab(items_page, "型号与确认项")
+
+        # ---- 包材
+        materials_page = QWidget()
+        materials_layout = QVBoxLayout(materials_page)
+        materials_layout.setContentsMargins(22, 20, 22, 20)
+        materials_layout.setSpacing(12)
+        materials_layout.addWidget(label("按型号登记包材，修改用量后请购数量自动重算；不同型号的同名包材分别保留。", "hint"))
+        self.materials = table(["型号", "包材", "单件用量", "请购数量", "已到数量", "交期", "提醒日"],
+                               widths=[190, 0, 96, 104, 96, 110, 110], stretch=1, right=(2, 3, 4))
+        materials_frame, _ = panel(self.materials, "包材明细", "双击记录编辑交期与到料")
+        materials_layout.addWidget(materials_frame, 1)
+        materials_layout.addLayout(ghost_row(button("添加包材", self.add_material, "primary", "plus"),
+                                             button("编辑交期 / 到料", self.edit_material),
+                                             button("移除所选包材", self.remove_material, "danger")))
+        self.materials.cellDoubleClicked.connect(lambda *_: self.edit_material())
+        tabs.addTab(materials_page, "包材请购与到料")
+
+        # ---- 跟进记录
+        notes_page = QWidget()
+        notes_layout = QVBoxLayout(notes_page)
+        notes_layout.setContentsMargins(22, 20, 22, 20)
+        notes_layout.setSpacing(12)
+        self.notes = QTextEdit(self.order.get("notes", ""))
+        self.notes.setPlaceholderText("记录异常、处理进展或下次跟进事项……")
+        notes_layout.addWidget(self.notes, 1)
+        notes_layout.addWidget(label("保存历史", "section", False))
+        history = QTextEdit()
+        history.setReadOnly(True)
+        history.setMaximumHeight(170)
+        history.setPlainText("\n".join(f"{at.replace('T', ' ')}    {action}" for at, action in store.history(self.order["id"])))
+        notes_layout.addWidget(history)
+        tabs.addTab(notes_page, "跟进记录")
+
+        footer = QHBoxLayout()
+        footer.addWidget(label("修改将在点击“保存订单”后生效。", "hint"), 1)
+        footer.addWidget(button("取消", self.reject))
+        footer.addWidget(button("保存订单", self.save, "primary"))
+        root.addSpacing(12)
+        root.addLayout(footer)
         self.refresh()
 
     def refresh(self):
         self.items.setRowCount(0)
-        for row,item in enumerate(self.order["items"]):
-            put(self.items,row,[item["model"],item["quantity"],"已确认" if item["bom"] else "待确认", "已确认" if item["analyzed"] else "待确认", item["analysis_at"],"已确认" if item["packaging"] else "待确认", "完成" if item["completed"] else "进行中"])
+        for row, item in enumerate(self.order["items"]):
+            put(self.items, row, [item["model"], item["quantity"],
+                                  "已确认" if item["bom"] else "待确认",
+                                  "已确认" if item["analyzed"] else "待确认",
+                                  item["analysis_at"],
+                                  "已确认" if item["packaging"] else "待确认",
+                                  "完成" if item["completed"] else "进行中"])
+            align_numbers(self.items, row, (1,))
         self.materials.setRowCount(0)
-        for row,m in enumerate(self.order["materials"]):
-            model = next(i["model"] for i in self.order["items"] if i["id"]==m["item_id"])
-            put(self.materials,row,[model,m["name"],m["usage"],fmt(demand(self.order,m)),m.get("arrived","0"),m.get("due_date",""),m.get("remind_date") or m.get("due_date","")])
+        for row, material in enumerate(self.order["materials"]):
+            model = next(i["model"] for i in self.order["items"] if i["id"] == material["item_id"])
+            put(self.materials, row, [model, material["name"], material["usage"], fmt(demand(self.order, material)),
+                                      material.get("arrived", "0"), material.get("due_date", ""),
+                                      material.get("remind_date") or material.get("due_date", "")])
+            align_numbers(self.materials, row, (2, 3, 4))
 
-    def bulk(self,key):
-        if not self.order["items"]: QMessageBox.information(self,"提示","请先添加型号"); return
-        done = all_checked(self.order,key)
+    def bulk(self, key):
+        if not self.order["items"]:
+            QMessageBox.information(self, "提示", "请先添加型号")
+            return
+        done = all_checked(self.order, key)
         if done:
-            if QMessageBox.question(self,"撤销整单确认","此项已全部确认。是否撤销当前全部型号的此项确认？") != QMessageBox.StandardButton.Yes: return
-        confirm_all(self.order,key,not done); self.refresh()
+            if QMessageBox.question(self, "撤销整单确认", "此项已全部确认。是否撤销当前全部型号的此项确认？") != QMessageBox.StandardButton.Yes:
+                return
+        confirm_all(self.order, key, not done)
+        self.refresh()
 
-    def add_item(self): self.change_item(None)
+    def add_item(self):
+        self.change_item(None)
+
     def edit_item(self):
         row = self.items.currentRow()
-        if row>=0: self.change_item(row)
-    def change_item(self,row):
-        dialog = ItemDialog(self.order["items"][row] if row is not None else new_item(),self)
+        if row >= 0:
+            self.change_item(row)
+
+    def change_item(self, row):
+        dialog = ItemDialog(self.order["items"][row] if row is not None else new_item(), self)
         if dialog.exec():
-            value = dialog.value(); trial = copy.deepcopy(self.order); trial["number"] = trial["number"] or "校验"
-            if row is None: trial["items"].append(value)
-            else: trial["items"][row] = value
-            try: validate_order(trial)
-            except Exception as exc: QMessageBox.warning(self,"无法保存型号",str(exc)); return
-            self.order["items"] = trial["items"]; self.refresh()
+            value = dialog.value()
+            trial = copy.deepcopy(self.order)
+            trial["number"] = trial["number"] or "校验"
+            if row is None:
+                trial["items"].append(value)
+            else:
+                trial["items"][row] = value
+            try:
+                validate_order(trial)
+            except Exception as exc:
+                QMessageBox.warning(self, "无法保存型号", str(exc))
+                return
+            self.order["items"] = trial["items"]
+            self.refresh()
+
     def remove_item(self):
         row = self.items.currentRow()
-        if row<0:return
-        item=self.order["items"][row]
-        if any(m["item_id"]==item["id"] for m in self.order["materials"]): QMessageBox.warning(self,"无法移除","此型号有关联包材，请先处理包材记录。"); return
-        if QMessageBox.question(self,"移除型号",f"移除 {item['model']}？保存订单后生效。") == QMessageBox.StandardButton.Yes:
-            self.order["items"].pop(row); self.refresh()
-    def add_material(self): self.change_material(None)
+        if row < 0:
+            return
+        item = self.order["items"][row]
+        if any(material["item_id"] == item["id"] for material in self.order["materials"]):
+            QMessageBox.warning(self, "无法移除", "此型号有关联包材，请先处理包材记录。")
+            return
+        if QMessageBox.question(self, "移除型号", f"移除 {item['model']}？保存订单后生效。") == QMessageBox.StandardButton.Yes:
+            self.order["items"].pop(row)
+            self.refresh()
+
+    def add_material(self):
+        self.change_material(None)
+
     def edit_material(self):
         row = self.materials.currentRow()
-        if row>=0: self.change_material(row)
-    def change_material(self,row):
-        if not self.order["items"]: QMessageBox.information(self,"提示","请先在“型号与确认项”中添加型号"); return
-        trial=copy.deepcopy(self.order); trial["number"]=trial["number"] or "校验"
-        dialog=MaterialDialog(trial,self.order["materials"][row] if row is not None else None,self)
+        if row >= 0:
+            self.change_material(row)
+
+    def change_material(self, row):
+        if not self.order["items"]:
+            QMessageBox.information(self, "提示", "请先在“型号与确认项”中添加型号")
+            return
+        trial = copy.deepcopy(self.order)
+        trial["number"] = trial["number"] or "校验"
+        dialog = MaterialDialog(trial, self.order["materials"][row] if row is not None else None, self)
         if dialog.exec():
-            if row is None:self.order["materials"].append(dialog.material)
-            else:self.order["materials"][row]=dialog.material
+            if row is None:
+                self.order["materials"].append(dialog.material)
+            else:
+                self.order["materials"][row] = dialog.material
             self.refresh()
+
     def remove_material(self):
-        row=self.materials.currentRow()
-        if row>=0 and QMessageBox.question(self,"移除包材","移除此包材跟进记录？保存订单后生效。") == QMessageBox.StandardButton.Yes:
-            self.order["materials"].pop(row); self.refresh()
+        row = self.materials.currentRow()
+        if row >= 0 and QMessageBox.question(self, "移除包材", "移除此包材跟进记录？保存订单后生效。") == QMessageBox.StandardButton.Yes:
+            self.order["materials"].pop(row)
+            self.refresh()
+
     def save(self):
-        self.order.update({k:w.text().strip() for k,w in self.fields.items()}); self.order["received_at"]=self.received.dateTime().toString(Qt.DateFormat.ISODate)
-        self.order["contract"]=self.contract.isChecked(); self.order["notes"]=self.notes.toPlainText()
-        try:self.store.save_order(self.order)
+        self.order.update({key: widget.text().strip() for key, widget in self.fields.items()})
+        self.order["received_at"] = self.received.dateTime().toString(Qt.DateFormat.ISODate)
+        self.order["contract"] = self.contract.isChecked()
+        self.order["notes"] = self.notes.toPlainText()
+        try:
+            self.store.save_order(self.order)
         except Exception as exc:
-            QMessageBox.warning(self,"保存失败","订单号已存在，请使用其他订单号。" if "UNIQUE" in str(exc) else str(exc)); return
-        self.saved=True; self.accept()
+            QMessageBox.warning(self, "保存失败", "订单号已存在，请使用其他订单号。" if "UNIQUE" in str(exc) else str(exc))
+            return
+        self.saved = True
+        self.accept()
+
+
+class StatusStrip(QFrame):
+    """窗口底部状态条：只覆盖内容区，不压到侧边栏。"""
+
+    def __init__(self, text):
+        super().__init__()
+        self.setObjectName("statusStrip")
+        self.setFixedHeight(32)
+        self.default = text
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(24, 0, 22, 0)
+        layout.setSpacing(10)
+        self.label = label(text, "statusText", False)
+        layout.addWidget(self.label)
+        layout.addStretch(1)
+        layout.addWidget(label(f"v{VERSION}", "statusText", False))
+
+    def showMessage(self, text, timeout=0):
+        self.label.setText(text)
+        if timeout:
+            QTimer.singleShot(timeout, self, lambda: self.label.setText(self.default))
 
 
 class Worker(QThread):
-    success=Signal(object); failure=Signal(str); message=Signal(str)
-    def __init__(self, fn, parent): super().__init__(parent); self.fn=fn
+    success = Signal(object)
+    failure = Signal(str)
+    message = Signal(str)
+
+    def __init__(self, fn, parent):
+        super().__init__(parent)
+        self.fn = fn
+
     def run(self):
-        try:self.success.emit(self.fn(self.message.emit))
-        except Exception as exc:self.failure.emit(str(exc))
+        try:
+            self.success.emit(self.fn(self.message.emit))
+        except Exception as exc:
+            self.failure.emit(str(exc))
 
 
+# ------------------------------------------------------------------ 主窗口
 class MainWindow(QMainWindow):
-    def __init__(self,store=None):
-        super().__init__(); self.store=store or Store(); self.setWindowTitle(f"{APP_NAME} · v{VERSION}"); self.setWindowIcon(icon()); self.resize(1320,850); self.setMinimumSize(1040,700)
-        self.workers=[]; self.quitting=False; self.daily_dirty=False
-        central=QWidget(); self.setCentralWidget(central); outer=QHBoxLayout(central); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
-        self.nav=QListWidget(); self.nav.setObjectName("nav"); self.nav.setFixedWidth(198)
-        for title in ["今日待办","订单总表","包材跟进","每日跟进","设置与更新"]:self.nav.addItem(title)
-        outer.addWidget(self.nav); self.pages=QStackedWidget(); outer.addWidget(self.pages,1)
-        self.dashboard(); self.orders_page(); self.materials_page(); self.daily_page(); self.settings_page()
-        self.nav.currentRowChanged.connect(self.pages.setCurrentIndex); self.nav.setCurrentRow(0)
-        self.statusBar().showMessage("数据保存在本机  ·  自然日规则  ·  包材交期提醒 09:00")
-        self.tray=QSystemTrayIcon(icon(),self); self.tray.setToolTip(APP_NAME)
-        menu=QMenu(); menu.addAction("打开工作台",self.show_normal); menu.addAction("退出程序",self.exit_app); self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason:self.show_normal() if reason==QSystemTrayIcon.ActivationReason.DoubleClick else None)
+    def __init__(self, store=None):
+        super().__init__()
+        self.store = store or Store()
+        self.setWindowTitle(f"{APP_NAME} · v{VERSION}")
+        self.setWindowIcon(app_icon())
+        self.resize(1360, 880)
+        self.setMinimumSize(1100, 720)
+        self.workers = []
+        self.quitting = False
+        self.daily_dirty = False
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(238)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(0)
+
+        brand = QWidget()
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(22, 24, 18, 22)
+        brand_layout.setSpacing(11)
+        mark = QLabel()
+        mark.setPixmap(brand_mark(36))
+        brand_layout.addWidget(mark)
+        titles = QVBoxLayout()
+        titles.setSpacing(3)
+        titles.addWidget(label(APP_NAME, "brandName", False))
+        titles.addWidget(label(f"v{VERSION} · 本机数据", "brandMeta", False))
+        brand_layout.addLayout(titles, 1)
+        side.addWidget(brand)
+
+        caption = QWidget()
+        caption_layout = QHBoxLayout(caption)
+        caption_layout.setContentsMargins(24, 2, 22, 8)
+        caption_layout.addWidget(label("工作台", "navCaption", False))
+        side.addWidget(caption)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        self.nav.setFixedWidth(238)
+        self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for title, _ in NAV:
+            item = QListWidgetItem(title)
+            item.setSizeHint(QSize(0, 42))
+            self.nav.addItem(item)
+        self.nav.setFixedHeight(sum(self.nav.sizeHintForRow(row) for row in range(self.nav.count())) + 4)
+        side.addWidget(self.nav)
+
+        summary_holder = QWidget()
+        summary_layout = QVBoxLayout(summary_holder)
+        summary_layout.setContentsMargins(16, 6, 16, 0)
+        summary = QFrame()
+        summary.setObjectName("sideCard")
+        summary_box = QVBoxLayout(summary)
+        summary_box.setContentsMargins(14, 12, 14, 13)
+        summary_box.setSpacing(4)
+        today = datetime.now()
+        summary_box.addWidget(label(f"{today.month} 月 {today.day} 日 · 周{'一二三四五六日'[today.weekday()]}",
+                                    "sideCardTitle", False))
+        self.side_meta = label("进行中 0 单 · 待办 0 项", "sideCardMeta", False)
+        summary_box.addWidget(self.side_meta)
+        summary_layout.addWidget(summary)
+        side.addWidget(summary_holder)
+        side.addStretch(1)
+
+        line = QFrame()
+        line.setObjectName("sideLine")
+        line.setFixedHeight(1)
+        side.addWidget(line)
+        foot = QWidget()
+        foot_layout = QVBoxLayout(foot)
+        foot_layout.setContentsMargins(22, 16, 22, 20)
+        foot_layout.setSpacing(5)
+        foot_layout.addWidget(label("数据保存在本机", "sideFootTitle", False))
+        foot_layout.addWidget(label("不联网、不上传\n包材交期提醒 每天 09:00", "sideFoot"))
+        side.addWidget(foot)
+        outer.addWidget(sidebar)
+
+        self.pages = QStackedWidget()
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.addWidget(self.pages, 1)
+        self.status = StatusStrip("数据保存在本机  ·  自然日规则  ·  包材交期提醒 09:00")
+        content_layout.addWidget(self.status)
+        outer.addWidget(content, 1)
+
+        self.dashboard()
+        self.orders_page()
+        self.materials_page()
+        self.daily_page()
+        self.settings_page()
+
+        self.nav.currentRowChanged.connect(self.switch_page)
+        self.nav.setCurrentRow(0)
+
+        self.tray = QSystemTrayIcon(app_icon(), self)
+        self.tray.setToolTip(APP_NAME)
+        menu = QMenu()
+        menu.addAction("打开工作台", self.show_normal)
+        menu.addSeparator()
+        menu.addAction("退出程序", self.exit_app)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(lambda reason: self.show_normal()
+                                    if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
         self.tray.messageClicked.connect(self.show_normal)
-        if QSystemTrayIcon.isSystemTrayAvailable():self.tray.show()
-        self.timer=QTimer(self); self.timer.timeout.connect(self.tick); self.timer.start(30000)
-        self.refresh(); self.load_daily(); QTimer.singleShot(1800,self.tick)
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.show()
 
-    def page(self,title,subtitle):
-        page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,25,28,22); layout.setSpacing(16)
-        layout.addWidget(label(title,"title")); layout.addWidget(label(subtitle,"muted")); self.pages.addWidget(page); return layout
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(30000)
+        self.refresh()
+        self.load_daily()
+        QTimer.singleShot(1800, self.tick)
 
+    # ---------- 结构 ----------
+    def switch_page(self, index):
+        self.pages.setCurrentIndex(index)
+        for row, (_, name) in enumerate(NAV):
+            self.nav.item(row).setIcon(icon(name, "#ffffff" if row == index else "#9db2d2", 18,
+                                            1.9 if row == index else 1.8))
+
+    def page(self, title, subtitle, actions=()):
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(30, 26, 30, 18)
+        root.setSpacing(0)
+        head = QHBoxLayout()
+        head.setSpacing(10)
+        titles = QVBoxLayout()
+        titles.setSpacing(6)
+        titles.addWidget(label(title, "title", False))
+        titles.addWidget(label(subtitle, "subtitle"))
+        head.addLayout(titles, 1)
+        if actions:
+            action_row = QHBoxLayout()
+            action_row.setSpacing(8)
+            for widget in actions:
+                action_row.addWidget(widget)
+            head.addLayout(action_row)
+        root.addLayout(head)
+        root.addSpacing(18)
+        body = QVBoxLayout()
+        body.setSpacing(14)
+        root.addLayout(body, 1)
+        self.pages.addWidget(page)
+        return body
+
+    def table_card(self, title, table_widget, meta=""):
+        return panel(table_widget, title, meta)
+
+    # ---------- 页面 ----------
     def dashboard(self):
-        layout=self.page("今日待办","优先处理未完成的确认与交期事项。双击待办可进入订单详情。")
-        row=QHBoxLayout(); self.stats=[]
-        for title in ["进行中的订单","高优先级订单","待确认包材信息","未解决每日跟进"]:
-            frame=QFrame(); frame.setObjectName("card"); box=QVBoxLayout(frame); box.setContentsMargins(18,14,18,14)
-            box.addWidget(label(title,"muted")); value=label("0","stat"); box.addWidget(value); self.stats.append(value); row.addWidget(frame)
-        layout.addLayout(row); actions=QHBoxLayout(); actions.addWidget(button("＋ 登记新订单",lambda:self.edit_order(),True)); actions.addWidget(button("导入订单",self.import_orders)); actions.addStretch(); layout.addLayout(actions)
-        self.todo=table(["优先级","订单号","客户","型号 / 范围","待办事项","经办人"]); layout.addWidget(self.todo)
-        self.todo.cellDoubleClicked.connect(lambda row,col:self.open_identity(self.todo,row))
-        self.empty=label("暂无待办。登记或导入订单后，未完成事项会自动列在这里。","muted"); layout.addWidget(self.empty)
+        body = self.page("今日待办", "按优先级排列，双击任意一行进入订单详情。",
+                         [button("导入订单", self.import_orders, icon_name="import"),
+                          button("登记新订单", lambda: self.edit_order(), "primary", "plus")])
+
+        stats = QHBoxLayout()
+        stats.setSpacing(14)
+        self.stats = []
+        cards = [("进行中的订单", "inbox", ACCENT, "#eaf1fe"),
+                 ("高优先级订单", "alert", WARN, "#fdf3e2"),
+                 ("待确认包材信息", "package", "#7a5cd8", "#f1ecfe"),
+                 ("未解决每日跟进", "clock", SUCCESS, "#e7f6ef")]
+        for title, name, tint, background in cards:
+            frame = QFrame()
+            frame.setObjectName("card")
+            layout = QHBoxLayout(frame)
+            layout.setContentsMargins(17, 16, 17, 16)
+            layout.setSpacing(13)
+            layout.addWidget(chip(name, tint, background, 40))
+            text = QVBoxLayout()
+            text.setSpacing(3)
+            text.addWidget(label(title, "muted", False))
+            value = label("0", "stat", False)
+            text.addWidget(value)
+            self.stats.append(value)
+            layout.addLayout(text, 1)
+            shadow(frame)
+            stats.addWidget(frame, 1)
+        body.addLayout(stats)
+
+        self.todo = table(["优先级", "订单号", "客户", "型号 / 范围", "待办事项", "经办人"],
+                          widths=[92, 150, 180, 160, 0, 110], stretch=4)
+        self.todo.setItemDelegateForColumn(0, BadgeDelegate(self.todo))
+        self.todo.cellDoubleClicked.connect(lambda row, col: self.open_identity(self.todo, row))
+        frame, self.todo_meta = self.table_card("待办清单", self.todo, "0 项")
+        self.empty = label("暂无待办。登记或导入订单后，未完成事项会自动列在这里。", "muted")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        frame.layout().addWidget(self.empty, 1)
+        body.addWidget(frame, 1)
 
     def orders_page(self):
-        layout=self.page("订单总表","以整单跟进为主，保留每个型号的独立确认。完成的订单仍可查询和重新打开。")
-        row=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText("搜索订单号、客户、型号、合同 / 销售单号、经办人"); row.addWidget(self.search,1)
-        self.filter=QComboBox(); self.filter.addItems(["全部订单","进行中","高优先级","已完成"]); row.addWidget(self.filter)
-        row.addWidget(button("＋ 新订单",lambda:self.edit_order(),True)); row.addWidget(button("导入",self.import_orders)); row.addWidget(button("导入模板",self.template)); layout.addLayout(row)
-        self.orders_table=table(["优先级","订单号","客户","经办人","型号数","合同","BOM","分析","包材信息","跟进完成"]); layout.addWidget(self.orders_table)
-        self.orders_table.cellDoubleClicked.connect(lambda row,col:self.open_identity(self.orders_table,row)); self.search.textChanged.connect(self.refresh); self.filter.currentIndexChanged.connect(self.refresh)
-        row=QHBoxLayout(); row.addWidget(button("打开所选订单",lambda:self.open_identity(self.orders_table,self.orders_table.currentRow()))); row.addStretch(); self.order_count=label("","muted"); row.addWidget(self.order_count); layout.addLayout(row)
+        body = self.page("订单总表", "以整单跟进为主，每个型号保留独立确认；完成的订单仍可查询和重新打开。",
+                         [button("导入模板", self.template, icon_name="template"),
+                          button("导入", self.import_orders, icon_name="import"),
+                          button("新订单", lambda: self.edit_order(), "primary", "plus")])
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("搜索订单号、客户、型号、合同 / 销售单号、经办人")
+        self.search.addAction(icon("search", FAINT, 15), QLineEdit.ActionPosition.LeadingPosition)
+        self.search.setClearButtonEnabled(True)
+        self.filter = QComboBox()
+        self.filter.addItems(["全部订单", "进行中", "高优先级", "已完成"])
+        self.filter.setMinimumWidth(118)
+        toolbar.addWidget(self.search, 1)
+        toolbar.addWidget(self.filter)
+        body.addLayout(toolbar)
+
+        self.orders_table = table(["优先级", "订单号", "客户", "经办人", "型号数", "合同", "BOM", "分析", "包材信息", "跟进完成"],
+                                  widths=[86, 132, 0, 86, 66, 88, 92, 92, 100, 100], stretch=2, right=(4,))
+        self.orders_table.setItemDelegateForColumn(0, BadgeDelegate(self.orders_table))
+        self.orders_table.setItemDelegateForColumn(5, StatusDelegate(self.orders_table))
+        for column in (6, 7, 8, 9):
+            self.orders_table.setItemDelegateForColumn(column, ProgressDelegate(self.orders_table))
+        self.orders_table.cellDoubleClicked.connect(lambda row, col: self.open_identity(self.orders_table, row))
+        self.search.textChanged.connect(self.refresh)
+        self.filter.currentIndexChanged.connect(self.refresh)
+        frame, self.order_count = self.table_card("订单列表", self.orders_table, "共 0 单")
+        body.addWidget(frame, 1)
+
+        footer = QHBoxLayout()
+        footer.addWidget(button("打开所选订单", lambda: self.open_identity(self.orders_table, self.orders_table.currentRow())))
+        footer.addStretch(1)
+        footer.addWidget(label("双击任意一行也可打开", "meta", False))
+        body.addLayout(footer)
 
     def materials_page(self):
-        layout=self.page("包材跟进","请购数量按产品数量 × 单件用量计算。双击记录可进入订单，更新交期、到料及备注。")
-        self.material_filter=QComboBox(); self.material_filter.addItems(["全部包材","未到齐","已到齐"]); self.material_filter.currentIndexChanged.connect(self.refresh); layout.addWidget(self.material_filter)
-        self.material_table=table(["订单号","型号","包材","请购数量","单位","已到","未到","预计交期","提醒日 09:00","请购单号"]); layout.addWidget(self.material_table)
-        self.material_table.cellDoubleClicked.connect(lambda row,col:self.open_identity(self.material_table,row))
+        body = self.page("包材跟进", "请购数量 = 产品数量 × 单件用量。双击记录可进入订单，更新交期与到料。")
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.material_filter = QComboBox()
+        self.material_filter.addItems(["全部包材", "未到齐", "已到齐"])
+        self.material_filter.setMinimumWidth(118)
+        self.material_filter.currentIndexChanged.connect(self.refresh)
+        row.addWidget(self.material_filter)
+        row.addStretch(1)
+        row.addWidget(label("到齐后自动停止提醒", "meta", False))
+        body.addLayout(row)
+
+        self.material_table = table(["订单号", "型号", "包材", "请购数量", "单位", "已到", "未到", "预计交期", "提醒日 09:00", "请购单号"],
+                                    widths=[136, 132, 0, 92, 56, 66, 66, 104, 112, 128], stretch=2, right=(3, 5, 6))
+        self.material_table.cellDoubleClicked.connect(lambda row, col: self.open_identity(self.material_table, row))
+        frame, self.material_meta = self.table_card("包材明细", self.material_table, "")
+        body.addWidget(frame, 1)
 
     def daily_page(self):
-        layout=self.page("每日跟进","数据在其他系统刷新；这里只记录检查结果、是否需要跟进及处理进展。历史未解决事项会持续出现在今日待办中。")
-        row=QHBoxLayout(); row.addWidget(label("记录日期")); self.daily_date=date_field(); self.daily_date.dateChanged.connect(self.date_changed); row.addWidget(self.daily_date); row.addStretch(); row.addWidget(button("保存当日记录",self.save_daily,True)); layout.addLayout(row)
-        self.daily_widgets={}
-        for key in ["分仓数据","成品入库数据","销售出库数据"]:
-            frame=QFrame(); frame.setObjectName("card"); box=QVBoxLayout(frame); box.setContentsMargins(18,14,18,14)
-            header=QHBoxLayout(); header.addWidget(label(key)); state=QComboBox(); state.addItems(["待检查","无需跟进","需要跟进","已处理"]); header.addWidget(state); header.addStretch(); box.addLayout(header)
-            notes=QLineEdit(); notes.setPlaceholderText("关联订单、经办人、异常情况与处理进展……"); box.addWidget(notes); layout.addWidget(frame); self.daily_widgets[key]=(state,notes)
-            state.currentIndexChanged.connect(self.autosave_daily); notes.editingFinished.connect(self.autosave_daily)
-        layout.addWidget(label("状态和备注修改后自动保存；也可点击“保存当日记录”。切换日期可继续处理历史事项。","muted")); layout.addStretch()
-        self.current_daily_day=date.today().isoformat(); self.loading_daily=False
+        body = self.page("每日跟进", "数据在其他系统刷新；这里只记录检查结果、是否需要跟进及处理进展。未解决事项会并入今日待办。",
+                         [button("保存当日记录", self.save_daily, "primary", "check")])
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(label("记录日期", "fieldLabel", False))
+        self.daily_date = date_field()
+        self.daily_date.setFixedWidth(160)
+        self.daily_date.dateChanged.connect(self.date_changed)
+        row.addWidget(self.daily_date)
+        row.addStretch(1)
+        row.addWidget(label("状态与备注修改后自动保存", "meta", False))
+        body.addLayout(row)
+
+        palette = [("分仓数据", "package", ACCENT, "#eaf1fe"), ("成品入库数据", "inbox", "#7a5cd8", "#f1ecfe"),
+                   ("销售出库数据", "activity", SUCCESS, "#e7f6ef")]
+        self.daily_widgets = {}
+        for key, name, tint, background in palette:
+            frame = QFrame()
+            frame.setObjectName("card")
+            layout = QHBoxLayout(frame)
+            layout.setContentsMargins(16, 13, 16, 13)
+            layout.setSpacing(12)
+            layout.addWidget(chip(name, tint, background, 32))
+            layout.addWidget(label(key, "section", False), 0)
+            state = QComboBox()
+            state.addItems(["待检查", "无需跟进", "需要跟进", "已处理"])
+            state.setFixedWidth(126)
+            layout.addWidget(state)
+            notes = QLineEdit()
+            notes.setPlaceholderText("关联订单、经办人、异常情况与处理进展……")
+            layout.addWidget(notes, 1)
+            body.addWidget(frame)
+            self.daily_widgets[key] = (state, notes)
+            state.currentIndexChanged.connect(self.autosave_daily)
+            notes.editingFinished.connect(self.autosave_daily)
+
+        self.daily_history = table(["记录日期", "分仓数据", "成品入库数据", "销售出库数据"],
+                                   widths=[104, 0, 0, 0])
+        for column in (1, 2, 3):
+            self.daily_history.setItemDelegateForColumn(column, StatusDelegate(self.daily_history))
+            self.daily_history.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        self.daily_history.cellDoubleClicked.connect(self.open_daily_history)
+        history_frame, _ = panel(self.daily_history, "近 7 天记录", "双击可切换到该日期")
+        body.addWidget(history_frame, 1)
+        self.current_daily_day = date.today().isoformat()
+        self.loading_daily = False
 
     def settings_page(self):
-        layout=self.page("设置与更新",f"{APP_NAME}  v{VERSION}  ·  Windows 桌面版")
-        frame=QFrame(); frame.setObjectName("card"); box=QVBoxLayout(frame); box.setContentsMargins(22,18,22,18)
-        box.addWidget(label("提醒规则")); box.addWidget(label("• 合同：接单满 24 小时仍未确认，提高优先级。\n• 包材信息：分析日期满 10 个自然日仍未确认，提高优先级。\n• 包材交期：填写的提醒日 09:00 起提示，未填写提醒日时使用交期。\n• 整单跟进完成后停止该单提醒；单个型号完成后停止该型号包材提醒。"))
-        self.tray_check=QCheckBox("关闭窗口后保留在系统托盘，继续提醒"); self.tray_check.setChecked(self.store.get("tray","1")=="1"); self.tray_check.toggled.connect(lambda value:self.store.set("tray","1" if value else "0")); box.addWidget(self.tray_check)
-        self.startup=QCheckBox("登录 Windows 后自动启动（最小化到托盘）"); self.startup.setChecked(self.startup_enabled()); self.startup.toggled.connect(self.change_startup); box.addWidget(self.startup)
-        box.addWidget(label("准点提醒需要程序正在运行且电脑已开机。若 09:00 时未运行，打开后会补查；优先级仍会按期限计算。","muted")); layout.addWidget(frame)
-        row=QHBoxLayout(); row.addWidget(button("导出数据备份",self.export_backup)); row.addWidget(button("从备份恢复",self.restore_backup)); row.addWidget(button("打开数据目录",lambda:QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir()))))); row.addStretch(); layout.addLayout(row)
-        row=QHBoxLayout(); self.update_button=button("检查新版本",self.check_update,True); row.addWidget(self.update_button); row.addWidget(button("打开 GitHub 项目",lambda:QDesktopServices.openUrl(QUrl(f"https://github.com/{REPOSITORY}")))); row.addStretch(); layout.addLayout(row)
-        self.update_status=label("更新会校验下载文件，自动备份数据库，再替换程序并重启。","muted"); layout.addWidget(self.update_status); layout.addStretch()
+        body = self.page("设置与更新", f"{APP_NAME}  v{VERSION}  ·  Windows 桌面版")
+        columns = QHBoxLayout()
+        columns.setSpacing(14)
+        left = QVBoxLayout()
+        left.setSpacing(14)
+        right = QVBoxLayout()
+        right.setSpacing(14)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
 
-    def refresh(self,*args):
-        if not hasattr(self,"material_table"):return
-        orders=self.store.orders()
-        orders.sort(key=lambda o:(all_checked(o,"completed"),-max((r["level"] for r in reminders(o)),default=0)))
-        self.by_id={o["id"]:o for o in orders}; self.todo.setRowCount(0); self.orders_table.setRowCount(0); self.material_table.setRowCount(0)
-        tasks=[]; elevated=0; waiting=0; active=0
+        rules = QFrame()
+        rules.setObjectName("card")
+        rules_layout = QVBoxLayout(rules)
+        rules_layout.setContentsMargins(20, 17, 20, 18)
+        rules_layout.setSpacing(10)
+        rules_layout.addWidget(label("提醒规则", "section", False))
+        rules_layout.addSpacing(2)
+        for text in ["合同：接单满 24 小时仍未确认，提升为高优先级。",
+                     "包材信息：分析日期满 10 个自然日仍未确认，提升为高优先级。",
+                     "包材交期：提醒日 09:00 起提示；未填写提醒日时使用预计交期。",
+                     "整单跟进完成后停止该单提醒；单个型号完成只停该型号。"]:
+            rules_layout.addLayout(rule_row(text))
+        left.addWidget(rules)
+
+        runtime = QFrame()
+        runtime.setObjectName("card")
+        runtime_layout = QVBoxLayout(runtime)
+        runtime_layout.setContentsMargins(20, 17, 20, 18)
+        runtime_layout.setSpacing(10)
+        runtime_layout.addWidget(label("运行方式", "section", False))
+        self.tray_check = QCheckBox("关闭窗口后保留在系统托盘，继续提醒")
+        self.tray_check.setChecked(self.store.get("tray", "1") == "1")
+        self.tray_check.toggled.connect(lambda value: self.store.set("tray", "1" if value else "0"))
+        runtime_layout.addWidget(self.tray_check)
+        self.startup = QCheckBox("登录 Windows 后自动启动（最小化到托盘）")
+        self.startup.setChecked(self.startup_enabled())
+        self.startup.toggled.connect(self.change_startup)
+        runtime_layout.addWidget(self.startup)
+        runtime_layout.addWidget(label("准点提醒需要程序正在运行且电脑已开机；若 09:00 未运行，打开后会补查。", "hint"))
+        left.addWidget(runtime)
+        left.addStretch(1)
+
+        backup = QFrame()
+        backup.setObjectName("card")
+        backup_layout = QVBoxLayout(backup)
+        backup_layout.setContentsMargins(20, 17, 20, 18)
+        backup_layout.setSpacing(12)
+        backup_layout.addWidget(label("数据与备份", "section", False))
+        backup_layout.addWidget(label("全部数据保存在本机数据库，不上传任何服务器；恢复前会自动备份当前数据。", "hint"))
+        db_line = QFrame()
+        db_line.setObjectName("inner")
+        db_layout = QVBoxLayout(db_line)
+        db_layout.setContentsMargins(13, 10, 13, 11)
+        db_layout.setSpacing(3)
+        db_layout.addWidget(label("数据库位置", "fieldLabel", False))
+        path_text = QFontMetrics(self.font()).elidedText(str(self.store.path), Qt.TextElideMode.ElideMiddle, 340)
+        path_label = label(path_text, "meta", False)
+        path_label.setToolTip(str(self.store.path))
+        db_layout.addWidget(path_label)
+        backup_layout.addWidget(db_line)
+        backup_layout.addLayout(ghost_row(button("导出数据备份", self.export_backup, icon_name="database"),
+                                          button("从备份恢复", self.restore_backup, icon_name="refresh"),
+                                          button("打开数据目录",
+                                                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir()))),
+                                                 icon_name="folder")))
+        backup_layout.addStretch(1)
+        right.addWidget(backup)
+
+        version = QFrame()
+        version.setObjectName("card")
+        version_layout = QVBoxLayout(version)
+        version_layout.setContentsMargins(20, 17, 20, 18)
+        version_layout.setSpacing(12)
+        version_layout.addWidget(label("版本更新", "section", False))
+        version_layout.addWidget(label(f"当前版本 v{VERSION}。更新会校验下载文件、自动备份数据库，再替换程序并重启。", "hint"))
+        self.update_button = button("检查新版本", self.check_update, "primary", "refresh")
+        version_layout.addLayout(ghost_row(self.update_button,
+                                           button("打开 GitHub 项目",
+                                                  lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{REPOSITORY}")),
+                                                  icon_name="external")))
+        self.update_status = label("尚未检查更新。", "hint")
+        version_layout.addWidget(self.update_status)
+        version_layout.addStretch(1)
+        right.addWidget(version)
+        right.addStretch(1)
+
+        body.addLayout(columns, 1)
+
+    # ---------- 数据刷新 ----------
+    def refresh(self, *args):
+        if not hasattr(self, "material_table"):
+            return
+        orders = self.store.orders()
+        orders.sort(key=lambda order: (all_checked(order, "completed"),
+                                       -max((reminder["level"] for reminder in reminders(order)), default=0)))
+        self.by_id = {order["id"]: order for order in orders}
+        self.todo.setRowCount(0)
+        self.orders_table.setRowCount(0)
+        self.material_table.setRowCount(0)
+        tasks = []
+        elevated = 0
+        waiting = 0
+        active = 0
+        missing_total = 0
         for order in orders:
-            due=reminders(order); completed=all_checked(order,"completed"); rank=max([r["level"] for r in due],default=0)
-            active+=not completed; elevated+=bool(rank); waiting+=sum(i["analyzed"] and not i["packaging"] and not i["completed"] for i in order["items"])
-            priority="已完成" if completed else ("紧急" if rank==3 else "高" if rank==2 else "正常")
-            keyword=self.search.text().strip().lower(); searchable=" ".join(str(order.get(k,"")) for k in ["number","customer","owner","contract_no","contract_owner","sales_no","sales_owner"])+" "+" ".join(i["model"] for i in order["items"])
-            filter_index=self.filter.currentIndex(); visible=(not keyword or keyword in searchable.lower()) and (filter_index==0 or filter_index==1 and not completed or filter_index==2 and rank>0 or filter_index==3 and completed)
-            if visible:put(self.orders_table,self.orders_table.rowCount(),[priority,order["number"],order["customer"],order["owner"],len(order["items"]),"已确认" if order["contract"] else "待确认",progress(order,"bom"),progress(order,"analyzed"),progress(order,"packaging"),progress(order,"completed")],order["id"])
+            due = reminders(order)
+            completed = all_checked(order, "completed")
+            rank = max([reminder["level"] for reminder in due], default=0)
+            active += not completed
+            elevated += bool(rank)
+            waiting += sum(item["analyzed"] and not item["packaging"] and not item["completed"] for item in order["items"])
+            priority = "已完成" if completed else ("紧急" if rank == 3 else "高" if rank == 2 else "正常")
+            keyword = self.search.text().strip().lower()
+            searchable = " ".join(str(order.get(key, "")) for key in
+                                  ["number", "customer", "owner", "contract_no", "contract_owner", "sales_no", "sales_owner"])
+            searchable += " " + " ".join(item["model"] for item in order["items"])
+            filter_index = self.filter.currentIndex()
+            visible = (not keyword or keyword in searchable.lower()) and (
+                filter_index == 0 or filter_index == 1 and not completed or filter_index == 2 and rank > 0
+                or filter_index == 3 and completed)
+            if visible:
+                row = self.orders_table.rowCount()
+                put(self.orders_table, row,
+                    [priority, order["number"], order["customer"], order["owner"], len(order["items"]),
+                     "已确认" if order["contract"] else "待确认",
+                     progress(order, "bom"), progress(order, "analyzed"),
+                     progress(order, "packaging"), progress(order, "completed")], order["id"])
+                align_numbers(self.orders_table, row, (4,))
             for reminder in due:
-                tasks.append((reminder["level"],order["number"],order["customer"],reminder["model"],reminder["reason"],order.get("contract_owner") or order["owner"] if reminder["kind"]=="contract" else order["owner"],order["id"]))
+                owner = order.get("contract_owner") or order["owner"] if reminder["kind"] == "contract" else order["owner"]
+                tasks.append((reminder["level"], order["number"], order["customer"], reminder["model"],
+                              reminder["reason"], owner, order["id"]))
             if not completed:
-                if not order["contract"] and not any(r["kind"]=="contract" for r in due):tasks.append((0,order["number"],order["customer"],"整单","待确认合同录入",order.get("contract_owner") or order["owner"],order["id"]))
-                for key,title in [("bom","待确认工程 BOM"),("analyzed","待确认分析")]:
-                    missing=[i["model"] for i in order["items"] if not i[key] and not i["completed"]]
-                    if missing:tasks.append((0,order["number"],order["customer"],"、".join(missing),title,order["owner"],order["id"]))
-            for m in order["materials"]:
-                qty=demand(order,m); arrived=updater_decimal(m.get("arrived",0)); missing=max(0,qty-arrived); mf=self.material_filter.currentIndex()
-                if mf==1 and missing<=0 or mf==2 and missing>0:continue
-                model=next(i["model"] for i in order["items"] if i["id"]==m["item_id"])
-                put(self.material_table,self.material_table.rowCount(),[order["number"],model,m["name"],fmt(qty),m.get("unit","个"),fmt(arrived),fmt(missing),m.get("due_date",""),m.get("remind_date") or m.get("due_date",""),m.get("request_no","")],order["id"])
-        daily_pending=0
+                if not order["contract"] and not any(reminder["kind"] == "contract" for reminder in due):
+                    tasks.append((0, order["number"], order["customer"], "整单", "待确认合同录入",
+                                  order.get("contract_owner") or order["owner"], order["id"]))
+                for key, title in [("bom", "待确认工程 BOM"), ("analyzed", "待确认分析")]:
+                    missing = [item["model"] for item in order["items"] if not item[key] and not item["completed"]]
+                    if missing:
+                        tasks.append((0, order["number"], order["customer"], "、".join(missing), title,
+                                      order["owner"], order["id"]))
+            for material in order["materials"]:
+                quantity = demand(order, material)
+                arrived = updater_decimal(material.get("arrived", 0))
+                missing_quantity = max(0, quantity - arrived)
+                missing_total += missing_quantity > 0
+                mode = self.material_filter.currentIndex()
+                if mode == 1 and missing_quantity <= 0 or mode == 2 and missing_quantity > 0:
+                    continue
+                model = next(item["model"] for item in order["items"] if item["id"] == material["item_id"])
+                row = self.material_table.rowCount()
+                put(self.material_table, row,
+                    [order["number"], model, material["name"], fmt(quantity), material.get("unit", "个"),
+                     fmt(arrived), fmt(missing_quantity), material.get("due_date", ""),
+                     material.get("remind_date") or material.get("due_date", ""), material.get("request_no", "")],
+                    order["id"])
+                align_numbers(self.material_table, row, (3, 5, 6))
+                due_date = material.get("due_date")
+                if missing_quantity > 0 and due_date and date.fromisoformat(due_date) < date.today():
+                    self.material_table.item(row, 6).setForeground(QColor(DANGER))
+        daily_pending = 0
         for day, records in self.store.daily_all():
-            for key,record in records.items():
-                if record.get("state")=="需要跟进":
-                    daily_pending+=1; tasks.append((1,"每日记录",day,key,record.get("notes") or "需要跟进","",f"daily:{day}"))
-        for rank,no,customer,model,reason,owner,identity in sorted(tasks,key=lambda x:-x[0]):
-            row=self.todo.rowCount(); put(self.todo,row,["紧急" if rank==3 else "高" if rank==2 else "待跟进" if rank==1 else "正常",no,customer,model,reason,owner],identity)
-            if rank>=2:self.todo.item(row,0).setForeground(QColor("#be4343" if rank==3 else "#b86c15"))
-        for w,value in zip(self.stats,[active,elevated,waiting,daily_pending]):w.setText(str(value))
-        self.empty.setVisible(not tasks); self.order_count.setText(f"当前显示 {self.orders_table.rowCount()} 单 / 共 {len(orders)} 单")
+            for key, record in records.items():
+                if record.get("state") == "需要跟进":
+                    daily_pending += 1
+                    tasks.append((1, "每日记录", day, key, record.get("notes") or "需要跟进", "", f"daily:{day}"))
+        for rank, number, customer, model, reason, owner, identity in sorted(tasks, key=lambda item: -item[0]):
+            row = self.todo.rowCount()
+            label_text = "紧急" if rank == 3 else "高" if rank == 2 else "待跟进" if rank == 1 else "正常"
+            put(self.todo, row, [label_text, number, customer, model, reason, owner], identity)
+        for widget, value in zip(self.stats, [active, elevated, waiting, daily_pending]):
+            widget.setText(str(value))
+        self.empty.setVisible(not tasks)
+        self.todo.setVisible(bool(tasks))
+        self.todo_meta.setText(f"{len(tasks)} 项待处理")
+        self.side_meta.setText(f"进行中 {active} 单 · 待办 {len(tasks)} 项")
+        shown = self.orders_table.rowCount()
+        self.order_count.setText(f"显示 {shown} 单 / 共 {len(orders)} 单")
+        self.material_meta.setText(f"未到齐 {missing_total} 项")
 
-    def open_identity(self,t,row):
-        if row<0:return
-        identity=t.item(row,0).data(Qt.ItemDataRole.UserRole)
+    def open_identity(self, widget, row):
+        if row < 0:
+            return
+        identity = widget.item(row, 0).data(Qt.ItemDataRole.UserRole)
         if identity.startswith("daily:"):
-            self.daily_date.setDate(QDate.fromString(identity[6:],"yyyy-MM-dd")); self.nav.setCurrentRow(3)
-        else:self.edit_order(self.by_id.get(identity))
-    def edit_order(self,order=None):
-        dialog=OrderDialog(self.store,order,self)
-        if dialog.exec():self.refresh()
-    def template(self):
-        path,_=QFileDialog.getSaveFileName(self,"保存导入模板","订单导入模板.xlsx","Excel (*.xlsx);;CSV (*.csv)")
-        if path:
-            try:write_template(path); QMessageBox.information(self,"模板已保存","订单号、型号、产品数量必填。同一订单可分多行填写不同型号。示例行请替换后再导入。")
-            except Exception as exc:QMessageBox.warning(self,"保存失败",str(exc))
-    def import_orders(self):
-        path,_=QFileDialog.getOpenFileName(self,"导入新订单","","订单文件 (*.xlsx *.csv)")
-        if not path:return
-        try:orders=read_import(path,[o["number"] for o in self.store.orders()])
-        except Exception as exc:QMessageBox.warning(self,"导入检查",str(exc));return
-        dialog=QDialog(self);dialog.setWindowTitle("导入预览");dialog.resize(860,520);box=QVBoxLayout(dialog)
-        box.addWidget(label(f"将新增 {len(orders)} 个订单、{sum(len(o['items']) for o in orders)} 个型号。确认后统一保存。"))
-        preview=table(["订单号","客户","经办人","型号","数量"])
-        for o in orders:
-            for i in o["items"]:put(preview,preview.rowCount(),[o["number"],o["customer"],o["owner"],i["model"],i["quantity"]])
-        box.addWidget(preview);buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel);buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);box.addWidget(buttons)
+            self.daily_date.setDate(QDate.fromString(identity[6:], "yyyy-MM-dd"))
+            self.nav.setCurrentRow(3)
+        else:
+            self.edit_order(self.by_id.get(identity))
+
+    def edit_order(self, order=None):
+        dialog = OrderDialog(self.store, order, self)
         if dialog.exec():
-            try:self.store.save_orders(orders);self.refresh();QMessageBox.information(self,"导入完成",f"已新增 {len(orders)} 个订单。")
-            except Exception as exc:QMessageBox.warning(self,"导入失败",str(exc))
-    def date_changed(self,*args):
-        if not hasattr(self,"current_daily_day"):return
-        self.save_daily(silent=True);self.load_daily()
-    def load_daily(self):
-        self.loading_daily=True;self.current_daily_day=self.daily_date.date().toString("yyyy-MM-dd");records=self.store.daily(self.current_daily_day)
-        for key,(state,notes) in self.daily_widgets.items():
-            state.setCurrentText(records.get(key,{}).get("state","待检查"));notes.setText(records.get(key,{}).get("notes",""))
-        self.loading_daily=False
-    def autosave_daily(self,*args):
-        if not getattr(self,"loading_daily",True):self.save_daily(silent=True)
-    def save_daily(self,checked=False,silent=False):
-        if getattr(self,"loading_daily",False):return
-        payload={key:dict(state=state.currentText(),notes=notes.text(),updated_at=datetime.now().isoformat(timespec="seconds")) for key,(state,notes) in self.daily_widgets.items()}
-        try:self.store.save_daily(self.current_daily_day,payload);self.refresh()
-        except Exception as exc:QMessageBox.warning(self,"保存失败",str(exc));return
-        if not silent:self.statusBar().showMessage(f"已保存 {self.current_daily_day} 的跟进记录",5000)
-    def tick(self):
-        self.refresh();now=datetime.now();due=[(o,reminders(o,now)) for o in self.store.orders()];due=[(o,r) for o,r in due if r]
-        key=now.date().isoformat()+":"+"|".join(sorted(o["id"]+str(len(r)) for o,r in due))
-        if now.hour>=9 and due and self.store.get("notified")!=key:
-            self.tray.showMessage(APP_NAME,f"{len(due)} 个订单有高优先级事项，请打开工作台查看。",QSystemTrayIcon.MessageIcon.Information,10000);self.store.set("notified",key)
-    def export_backup(self):
-        path,_=QFileDialog.getSaveFileName(self,"导出数据备份",f"订单工作台备份-{date.today()}.json","备份 (*.json)")
+            self.refresh()
+
+    def template(self):
+        path, _ = QFileDialog.getSaveFileName(self, "保存导入模板", "订单导入模板.xlsx", "Excel (*.xlsx);;CSV (*.csv)")
         if path:
-            try:self.store.export_json(path);QMessageBox.information(self,"备份完成","全部订单、包材、每日记录和保存历史已导出。")
-            except Exception as exc:QMessageBox.warning(self,"备份失败",str(exc))
+            try:
+                write_template(path)
+                QMessageBox.information(self, "模板已保存", "订单号、型号、产品数量必填。同一订单可分多行填写不同型号。示例行请替换后再导入。")
+            except Exception as exc:
+                QMessageBox.warning(self, "保存失败", str(exc))
+
+    def import_orders(self):
+        path, _ = QFileDialog.getOpenFileName(self, "导入新订单", "", "订单文件 (*.xlsx *.csv)")
+        if not path:
+            return
+        try:
+            orders = read_import(path, [order["number"] for order in self.store.orders()])
+        except Exception as exc:
+            QMessageBox.warning(self, "导入检查", str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("导入预览")
+        dialog.resize(880, 560)
+        box = QVBoxLayout(dialog)
+        box.setContentsMargins(24, 22, 24, 20)
+        box.setSpacing(0)
+        box.addWidget(label("导入预览", "dialogTitle", False))
+        box.addSpacing(5)
+        box.addWidget(label(f"将新增 {len(orders)} 个订单、{sum(len(o['items']) for o in orders)} 个型号。确认后统一保存，已有订单不会被覆盖。", "hint"))
+        box.addSpacing(14)
+        preview = table(["订单号", "客户", "经办人", "型号", "数量"], widths=[150, 0, 100, 180, 90], stretch=1)
+        for order in orders:
+            for item in order["items"]:
+                put(preview, preview.rowCount(), [order["number"], order["customer"], order["owner"],
+                                                  item["model"], item["quantity"]])
+        preview_frame, _ = self.table_card("待导入明细", preview, f"{len(orders)} 单")
+        box.addWidget(preview_frame, 1)
+        box.addSpacing(14)
+        box.addLayout(dialog_footer(dialog.reject, dialog.accept, "确认导入"))
+        if dialog.exec():
+            try:
+                self.store.save_orders(orders)
+                self.refresh()
+                QMessageBox.information(self, "导入完成", f"已新增 {len(orders)} 个订单。")
+            except Exception as exc:
+                QMessageBox.warning(self, "导入失败", str(exc))
+
+    def date_changed(self, *args):
+        if not hasattr(self, "current_daily_day"):
+            return
+        self.save_daily(silent=True)
+        self.load_daily()
+
+    def load_daily(self):
+        self.loading_daily = True
+        self.current_daily_day = self.daily_date.date().toString("yyyy-MM-dd")
+        records = self.store.daily(self.current_daily_day)
+        for key, (state, notes) in self.daily_widgets.items():
+            state.setCurrentText(records.get(key, {}).get("state", "待检查"))
+            notes.setText(records.get(key, {}).get("notes", ""))
+        self.loading_daily = False
+        self.load_daily_history()
+
+    def load_daily_history(self):
+        self.daily_history.setRowCount(0)
+        records = dict(self.store.daily_all())
+        for offset in range(7):
+            day = (date.today() - timedelta(days=offset)).isoformat()
+            entry = records.get(day, {})
+            values = [day] + [entry.get(key, {}).get("state") or "—"
+                              for key in ("分仓数据", "成品入库数据", "销售出库数据")]
+            put(self.daily_history, self.daily_history.rowCount(), values, f"daily:{day}")
+
+    def open_daily_history(self, row, column=0):
+        identity = self.daily_history.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if identity and identity.startswith("daily:"):
+            self.daily_date.setDate(QDate.fromString(identity[6:], "yyyy-MM-dd"))
+
+    def autosave_daily(self, *args):
+        if not getattr(self, "loading_daily", True):
+            self.save_daily(silent=True)
+
+    def save_daily(self, checked=False, silent=False):
+        if getattr(self, "loading_daily", False):
+            return
+        payload = {key: dict(state=state.currentText(), notes=notes.text(),
+                             updated_at=datetime.now().isoformat(timespec="seconds"))
+                   for key, (state, notes) in self.daily_widgets.items()}
+        try:
+            self.store.save_daily(self.current_daily_day, payload)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        if not silent:
+            self.status.showMessage(f"已保存 {self.current_daily_day} 的跟进记录", 5000)
+
+    def tick(self):
+        self.refresh()
+        now = datetime.now()
+        due = [(order, reminders(order, now)) for order in self.store.orders()]
+        due = [(order, reminder) for order, reminder in due if reminder]
+        key = now.date().isoformat() + ":" + "|".join(sorted(order["id"] + str(len(reminder)) for order, reminder in due))
+        if now.hour >= 9 and due and self.store.get("notified") != key:
+            self.tray.showMessage(APP_NAME, f"{len(due)} 个订单有高优先级事项，请打开工作台查看。",
+                                  QSystemTrayIcon.MessageIcon.Information, 10000)
+            self.store.set("notified", key)
+
+    def export_backup(self):
+        path, _ = QFileDialog.getSaveFileName(self, "导出数据备份", f"订单工作台备份-{date.today()}.json", "备份 (*.json)")
+        if path:
+            try:
+                self.store.export_json(path)
+                QMessageBox.information(self, "备份完成", "全部订单、包材、每日记录和保存历史已导出。")
+            except Exception as exc:
+                QMessageBox.warning(self, "备份失败", str(exc))
+
     def restore_backup(self):
-        path,_=QFileDialog.getOpenFileName(self,"选择数据备份","","备份 (*.json)")
-        if path and QMessageBox.question(self,"恢复备份","恢复会替换当前数据。程序会先自动备份现有数据库，是否继续？")==QMessageBox.StandardButton.Yes:
-            try:backup=self.store.restore_json(path);self.load_daily();self.refresh();QMessageBox.information(self,"恢复完成",f"恢复成功。替换前的数据备份在：\n{backup}")
-            except Exception as exc:QMessageBox.warning(self,"恢复失败",str(exc))
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据备份", "", "备份 (*.json)")
+        if path and QMessageBox.question(self, "恢复备份", "恢复会替换当前数据。程序会先自动备份现有数据库，是否继续？") == QMessageBox.StandardButton.Yes:
+            try:
+                backup = self.store.restore_json(path)
+                self.load_daily()
+                self.refresh()
+                QMessageBox.information(self, "恢复完成", f"恢复成功。替换前的数据备份在：\n{backup}")
+            except Exception as exc:
+                QMessageBox.warning(self, "恢复失败", str(exc))
+
     def startup_enabled(self):
-        if sys.platform!="win32":return False
+        if sys.platform != "win32":
+            return False
         import winreg
         try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Run") as key:return bool(winreg.QueryValueEx(key,"OrderFollowupDesktop")[0])
-        except OSError:return False
-    def change_startup(self,enabled):
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                return bool(winreg.QueryValueEx(key, "OrderFollowupDesktop")[0])
+        except OSError:
+            return False
+
+    def change_startup(self, enabled):
         try:
-            if not getattr(sys,"frozen",False):raise ValueError("请在打包后的 Windows 程序中设置开机启动")
+            if not getattr(sys, "frozen", False):
+                raise ValueError("请在打包后的 Windows 程序中设置开机启动")
             import winreg
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER,r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
-                if enabled:winreg.SetValueEx(key,"OrderFollowupDesktop",0,winreg.REG_SZ,f'"{sys.executable}" --minimized')
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                if enabled:
+                    winreg.SetValueEx(key, "OrderFollowupDesktop", 0, winreg.REG_SZ, f'"{sys.executable}" --minimized')
                 else:
-                    try:winreg.DeleteValue(key,"OrderFollowupDesktop")
-                    except FileNotFoundError:pass
+                    try:
+                        winreg.DeleteValue(key, "OrderFollowupDesktop")
+                    except FileNotFoundError:
+                        pass
         except Exception as exc:
-            self.startup.blockSignals(True);self.startup.setChecked(self.startup_enabled());self.startup.blockSignals(False);QMessageBox.warning(self,"设置未完成",str(exc))
-    def run_worker(self,fn,success):
-        w=Worker(fn,self);self.workers.append(w);w.message.connect(self.update_status.setText);w.success.connect(success);w.failure.connect(self.update_error);w.finished.connect(lambda:self.workers.remove(w));w.start()
+            self.startup.blockSignals(True)
+            self.startup.setChecked(self.startup_enabled())
+            self.startup.blockSignals(False)
+            QMessageBox.warning(self, "设置未完成", str(exc))
+
+    def run_worker(self, fn, success):
+        worker = Worker(fn, self)
+        self.workers.append(worker)
+        worker.message.connect(self.update_status.setText)
+        worker.success.connect(success)
+        worker.failure.connect(self.update_error)
+        worker.finished.connect(lambda: self.workers.remove(worker))
+        worker.start()
+
     def check_update(self):
-        self.update_button.setEnabled(False);self.update_status.setText("正在查询 GitHub 最新版本……");self.run_worker(lambda _:updater.get_release(),self.release_ready)
-    def update_error(self,message):
-        self.update_button.setEnabled(True);self.update_status.setText("更新未完成："+message)
-    def release_ready(self,release):
+        self.update_button.setEnabled(False)
+        self.update_status.setText("正在查询 GitHub 最新版本……")
+        self.run_worker(lambda _: updater.get_release(), self.release_ready)
+
+    def update_error(self, message):
         self.update_button.setEnabled(True)
-        if updater.version_tuple(release["tag_name"])<=updater.version_tuple(VERSION):self.update_status.setText(f"当前 v{VERSION} 已是最新版本。");return
-        if not getattr(sys,"frozen",False):self.update_status.setText("开发模式：发现 "+release["tag_name"]+"，请在 Windows 程序中更新。");return
-        if QMessageBox.question(self,"发现新版本",f"当前 v{VERSION} → {release['tag_name']}\n下载、备份数据并重启更新？")!=QMessageBox.StandardButton.Yes:return
-        self.update_button.setEnabled(False);self.run_worker(lambda emit:updater.download_release(release,emit),self.download_ready)
-    def download_ready(self,path):
-        try:self.store.backup();updater.launch_replacement(path)
-        except Exception as exc:self.update_error(str(exc));return
-        self.quitting=True;QTimer.singleShot(300,self.exit_app)
-    def show_normal(self):self.showNormal();self.raise_();self.activateWindow()
-    def closeEvent(self,event):
+        self.update_status.setText("更新未完成：" + message)
+
+    def release_ready(self, release):
+        self.update_button.setEnabled(True)
+        if updater.version_tuple(release["tag_name"]) <= updater.version_tuple(VERSION):
+            self.update_status.setText(f"当前 v{VERSION} 已是最新版本。")
+            return
+        if not getattr(sys, "frozen", False):
+            self.update_status.setText("开发模式：发现 " + release["tag_name"] + "，请在 Windows 程序中更新。")
+            return
+        if QMessageBox.question(self, "发现新版本", f"当前 v{VERSION} → {release['tag_name']}\n下载、备份数据并重启更新？") != QMessageBox.StandardButton.Yes:
+            return
+        self.update_button.setEnabled(False)
+        self.update_status.setText("正在下载并校验更新包……")
+        self.run_worker(lambda emit: updater.download_release(release, emit), self.download_ready)
+
+    def download_ready(self, path):
+        try:
+            self.store.backup()
+            updater.launch_replacement(path)
+        except Exception as exc:
+            self.update_error(str(exc))
+            return
+        self.quitting = True
+        QTimer.singleShot(300, self.exit_app)
+
+    def show_normal(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event):
         self.save_daily(silent=True)
-        if not self.quitting and self.tray_check.isChecked() and self.tray.isVisible():self.hide();event.ignore();return
-        if self.workers:event.ignore();QMessageBox.information(self,"正在更新","请等待版本查询或下载结束后退出。");return
-        event.accept();self.tray.hide()
+        if not self.quitting and self.tray_check.isChecked() and self.tray.isVisible():
+            self.hide()
+            event.ignore()
+            return
+        if self.workers:
+            event.ignore()
+            QMessageBox.information(self, "正在更新", "请等待版本查询或下载结束后退出。")
+            return
+        event.accept()
+        self.tray.hide()
+
     def exit_app(self):
-        if self.workers:QTimer.singleShot(500,self.exit_app);return
-        self.quitting=True;self.save_daily(silent=True);self.tray.hide();QApplication.instance().quit()
+        if self.workers:
+            QTimer.singleShot(500, self.exit_app)
+            return
+        self.quitting = True
+        self.save_daily(silent=True)
+        self.tray.hide()
+        QApplication.instance().quit()
 
 
 def updater_decimal(value):
-    from decimal import Decimal
     return Decimal(str(value))
