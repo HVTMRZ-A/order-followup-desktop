@@ -1,0 +1,40 @@
+import os
+import sys
+import traceback
+from pathlib import Path
+
+
+def main():
+    from PySide6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
+    from PySide6.QtCore import QLockFile
+    from workbench.storage import data_dir
+    from workbench.ui import MainWindow, STYLE
+    app=QApplication(sys.argv);app.setApplicationName("OrderFollowupDesktop");app.setStyle("Fusion");app.setStyleSheet(STYLE)
+    if "--self-test" in sys.argv:
+        if not os.environ.get("ORDER_WORKBENCH_DATA"):
+            raise RuntimeError("Self-test requires an isolated ORDER_WORKBENCH_DATA directory")
+        import json
+        import ssl
+        from workbench.storage import Store
+        from workbench.importer import write_template, read_import
+        from workbench import VERSION
+        store=Store();template=data_dir()/"self-test.xlsx";write_template(template)
+        parsed=read_import(template);window=MainWindow(store);window.show();app.processEvents()
+        window.grab().save(str(data_dir()/"self-test.png"))
+        report=dict(version=VERSION,pages=window.pages.count(),import_orders=len(parsed),import_models=len(parsed[0]["items"]),ssl=ssl.OPENSSL_VERSION,stored_orders=len(store.orders()))
+        (data_dir()/"self-test.json").write_text(json.dumps(report,ensure_ascii=False),encoding="utf-8")
+        window.quitting=True;window.close();window.tray.hide();store.db.close();return 0
+    lock=QLockFile(str(data_dir()/"app.lock"));lock.setStaleLockTime(0)
+    if not lock.tryLock(100):
+        QMessageBox.information(None,"订单跟进工作台","程序已经运行，请从系统托盘双击工作台图标打开。");return 0
+    def exception_hook(kind,value,tb):
+        (data_dir()/"error.log").write_text("".join(traceback.format_exception(kind,value,tb)),encoding="utf-8")
+        QMessageBox.critical(None,"操作未完成",str(value)+"\n错误记录已保存到数据目录。")
+    sys.excepthook=exception_hook
+    window=MainWindow()
+    if "--minimized" not in sys.argv or not QSystemTrayIcon.isSystemTrayAvailable():window.show()
+    return app.exec()
+
+
+if __name__=="__main__":
+    sys.exit(main())
