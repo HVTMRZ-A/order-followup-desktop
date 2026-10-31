@@ -23,7 +23,13 @@ def main():
     generated=ROOT/"build";generated.mkdir(exist_ok=True)
     icon().pixmap(64,64).save(str(generated/"app.png"))
     Image.open(generated/"app.png").save(generated/"app.ico",sizes=[(16,16),(32,32),(48,48),(64,64)])
-    subprocess.run([sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onefile","--windowed","--name","OrderFollowup","--icon",str(generated/"app.ico"),"--collect-data","openpyxl",str(ROOT/"main.py")],cwd=ROOT,check=True)
+    # Conda 可能提供较旧的 VC runtime。让根目录使用 Qt wheel 配套运行库，
+    # 避免 Python 先加载旧 DLL 后造成 QtWidgets 导入失败。
+    qt=Path(sys.prefix)/"Lib"/"site-packages"/"PySide6"
+    runtime_args=[]
+    for pattern in ("MSVCP140*.dll","VCRUNTIME140*.dll"):
+        for library in qt.glob(pattern):runtime_args.extend(["--add-binary",str(library)+";."])
+    subprocess.run([sys.executable,"-m","PyInstaller","--noconfirm","--clean","--onefile","--windowed","--name","OrderFollowup","--icon",str(generated/"app.ico"),"--collect-data","openpyxl",*runtime_args,str(ROOT/"main.py")],cwd=ROOT,check=True)
     dist=ROOT/"dist";write_template(dist/"订单导入模板.xlsx")
     import shutil
     shutil.copy2(ROOT/"docs"/"使用说明.md",dist/"使用说明.md")
