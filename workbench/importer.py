@@ -80,6 +80,15 @@ def read_import(path, existing_numbers=()):
     return [validate_order(order) for order in grouped.values()]
 
 
+def read_any(path, existing_numbers=()):
+    """自动识别文件类型：生产作业计划单 → 生产单解析；否则按导入模板解析。"""
+    from .production import is_production_sheet, read_production
+
+    if is_production_sheet(path):
+        return read_production(path, existing_numbers)
+    return read_import(path, existing_numbers)
+
+
 def write_template(path):
     rows = [HEADERS, ["示例-001", "示例客户", "张三", date.today().isoformat(), "型号A", 100, "", "", "张三", "", "李四", "此行为示例，导入前请替换"],
             ["示例-001", "示例客户", "张三", date.today().isoformat(), "型号B", 50, "", "", "张三", "", "李四", "此行为示例，导入前请替换"]]

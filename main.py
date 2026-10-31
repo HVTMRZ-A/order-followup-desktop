@@ -16,12 +16,17 @@ def main():
         import json
         import ssl
         from workbench.storage import Store
-        from workbench.importer import write_template, read_import
+        from workbench.importer import read_any, write_template
+        from workbench.production import PLAN_COLUMNS, is_production_sheet, plan_rows
         from workbench import VERSION
         store=Store();template=data_dir()/"self-test.xlsx";write_template(template)
-        parsed=read_import(template);window=MainWindow(store);window.show();app.processEvents()
+        parsed=read_any(template);window=MainWindow(store);window.show();app.processEvents()
         window.grab().save(str(data_dir()/"self-test.png"))
-        report=dict(version=VERSION,pages=window.pages.count(),import_orders=len(parsed),import_models=len(parsed[0]["items"]),ssl=ssl.OPENSSL_VERSION,stored_orders=len(store.orders()))
+        report=dict(version=VERSION,pages=window.pages.count(),import_orders=len(parsed),import_models=len(parsed[0]["items"]),ssl=ssl.OPENSSL_VERSION,stored_orders=len(store.orders()),
+                    production_detected=is_production_sheet(template),plan_columns=len(plan_rows(parsed[0])[0][0]) if plan_rows(parsed[0])[0] else 0,
+                    plan_columns_expected=len(PLAN_COLUMNS),orders_columns=window.orders_table.columnCount(),
+                    drag_ready=bool(window.acceptDrops() and window.drop_overlay is not None),
+                    todo_grouping=hasattr(window,"toggle_todo_group"),order_views=window.order_tabs.count())
         (data_dir()/"self-test.json").write_text(json.dumps(report,ensure_ascii=False),encoding="utf-8")
         window.quitting=True;window.close();window.tray.hide();store.db.close();return 0
     if "--verify-update" in sys.argv:

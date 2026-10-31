@@ -13,8 +13,10 @@ from PySide6.QtGui import QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication, QTabWidget  # noqa: E402
 
 from workbench.domain import confirm_all, new_item, new_order, uid  # noqa: E402
+from workbench.importer import read_any  # noqa: E402
 from workbench.storage import Store  # noqa: E402
-from workbench.ui import STYLE, ItemDialog, MainWindow, MaterialDialog, OrderDialog  # noqa: E402
+from workbench.ui import (STYLE, ImportPreviewDialog, ItemDialog, MainWindow,  # noqa: E402
+                          MaterialDialog, OrderDialog)
 
 OUT = ROOT / "outputs"
 OUT.mkdir(exist_ok=True)
@@ -35,11 +37,16 @@ def seed(store):
     now = datetime.now()
 
     a = new_order()
-    a.update(number="演示-SO-001", customer="台州华鼎贸易有限公司", owner="张三", contract_owner="张三",
-             sales_owner="李四", received_at=(now - timedelta(days=3)).isoformat(timespec="seconds"),
+    a.update(number="演示-SO-001", customer="台州华鼎贸易有限公司", customer_no="D010", owner="张三",
+             contract_owner="张三", sales_owner="李四", plan_serial="X2601352", transport="1*40HQ",
+             attribute="新增", received_at=(now - timedelta(days=3)).isoformat(timespec="seconds"),
              contract_no="演示-HT-001", sales_no="演示-XS-001", contract=True,
              notes="客户要求分两批出货，第二批等包材到齐后确认。")
     a["items"] = [new_item("LF3000-A", "500"), new_item("LF6200-A", "200")]
+    a["items"][0].update(category="储能逆变器-外", material_code="3.21.01.02.03.0014",
+                         requirement="LF3000-A_220V/230V/240V_50Hz/60Hz_AC输出3000W_PV 3000W*1_无并机线_绿田英文_覆膜彩包_非认证")
+    a["items"][1].update(category="储能逆变器-外", material_code="3.21.01.02.07.0008",
+                         requirement="LF6200-A_220V/230V/240V_50Hz/60Hz_AC输出6200W_PV 8500W*1_带并机线_绿田英文_覆膜彩包_非认证")
     confirm_all(a, "bom", True)
     confirm_all(a, "analyzed", True, (today - timedelta(days=12)).isoformat())
     a["materials"] = [
@@ -115,6 +122,59 @@ material_dialog.show()
 app.processEvents()
 material_dialog.grab().save(str(OUT / "ui-material-dialog.png"))
 material_dialog.reject()
+
+# 导入预览：优先用桌面上的真实生产单，没有就现场造一份等价结构
+sample = Path.home() / "Desktop" / "计划工作台" / "26LTJX2043 生产单 LE2000-4B.xlsx"
+if not sample.exists():
+    from openpyxl import Workbook
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["绿田机械股份有限公司     V1.3"])
+    sheet.append([])
+    sheet.append(["2026年10月份生产作业计划单"])
+    sheet.append(["整机生产单"])
+    sheet.append(["", "合同编号：", "26LTJX2043", "", "", "", "", "订单属性：", "新增"])
+    sheet.append(["", "客户编号：", "D299", "", "", "", "", "数量：", 580])
+    sheet.append(["计划完成日期:", "", 46356, "", "", "", "", "运输方式：", "1*40HQ"])
+    sheet.append(["序号", "产品大类", "客户型号", "公司型号", "数量", "单位", "产品要求", "包材", "BOM状态", "物料代码"])
+    sheet.append([1, "太阳能发电机", "", "LE2000-4B", 580, "台",
+                  "壁挂款，230V/50Hz，输出功率2kW，电池容量4019Wh，英插电源线", "绿田", "新增", "3.21.00.01.02.10011"])
+    sheet.append(["注意事项：", "", "1.商标和纸箱按照尼日利亚办事处指定的设计"])
+    sheet.append(["", "复核：", "", "", "", "", "", "经办人：", "戴爽"])
+    sheet.append(["", "批准：", "", "", "", "", "", "下单日期：", 46323])
+    sample = ROOT / "outputs" / "preview-data" / "sample-production.xlsx"
+    book.save(sample)
+
+import_orders = read_any(sample)
+import_dialog = ImportPreviewDialog(import_orders, store, window, sample.name)
+import_dialog.show()
+app.processEvents()
+import_dialog.grab().save(str(OUT / "ui-import-detail.png"))
+tabs = import_dialog.findChild(QTabWidget)
+tabs.setCurrentIndex(1)
+app.processEvents()
+import_dialog.grab().save(str(OUT / "ui-import-plan.png"))
+import_dialog.reject()
+
+# 待办分组折叠态 / 订单总表右侧列 / 拖拽遮罩
+window.nav.setCurrentRow(0)
+app.processEvents()
+pairs = [pair for pair in window.todo_groups.values() if pair[1]]
+if pairs:
+    window.toggle_todo_group(pairs[0][0], 0)
+    app.processEvents()
+    window.grab().save(str(OUT / "ui-todo-collapsed.png"))
+    window.toggle_todo_group(pairs[0][0], 0)
+window.nav.setCurrentRow(1)
+app.processEvents()
+bar = window.orders_table.horizontalScrollBar()
+bar.setValue(bar.maximum())
+app.processEvents()
+window.grab().save(str(OUT / "ui-orders-right.png"))
+window.show_drop_overlay(True)
+app.processEvents()
+window.grab().save(str(OUT / "ui-drop-overlay.png"))
+window.show_drop_overlay(False)
 
 window.quitting = True
 window.timer.stop()

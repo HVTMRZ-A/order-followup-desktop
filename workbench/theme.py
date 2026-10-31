@@ -68,6 +68,8 @@ ICONS = {
                 '<path d="M3.6 10.4h16.8"/><path d="M8.4 3.4v4"/><path d="M15.6 3.4v4"/>',
     "check": '<path d="m5 12.6 4.6 4.6L19 7.6"/>',
     "spark": '<path d="M12 3.4 13.9 9l5.7 1.9-5.7 1.9L12 18.4l-1.9-5.6L4.4 10.9 10.1 9z"/>',
+    "export": '<path d="M12 16.4V6.6"/><path d="m8.2 10.4 3.8-3.8 3.8 3.8"/>'
+              '<path d="M4.6 15.6v3a1.9 1.9 0 0 0 1.9 1.9h11a1.9 1.9 0 0 0 1.9-1.9v-3"/>',
 }
 
 
@@ -369,6 +371,11 @@ QHeaderView::section { background: #f8fafd; color: #6b7891; padding: 0 6px; bord
     border-bottom: 1px solid #e3e9f2; font-size: 11.5px; font-weight: 600; }
 QHeaderView::section:hover { background: #f1f5fb; }
 QTableCornerButton::section { background: #f8fafd; border: none; border-bottom: 1px solid #e3e9f2; }
+
+/* ---------- 拖拽导入遮罩 ---------- */
+QFrame#dropOverlay { background: rgba(250, 252, 255, 0.97); border: 2px dashed #2f6bdb; border-radius: 18px; }
+QLabel#dropTitle { font-size: 21px; font-weight: 700; color: #16233a; }
+QLabel#dropHint { font-size: 12.5px; color: #64748b; }
 
 /* ---------- 标签页 ---------- */
 QTabWidget::pane { border: none; background: transparent; }
