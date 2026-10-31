@@ -62,7 +62,7 @@ def download_release(release, progress=lambda message: None):
     return target
 
 
-def launch_replacement(source, target=None, wait_pid=None):
+def launch_replacement(source, target=None, wait_pid=None, restart_args=()):
     target = Path(target or sys.executable).resolve()
     source = Path(source).resolve()
     if source == target or not source.is_file():
@@ -73,6 +73,7 @@ def launch_replacement(source, target=None, wait_pid=None):
     shutil.copy2(source, staged)
     def ps_literal(value):
         return "'" + str(value).replace("'", "''") + "'"
+    arguments = " -ArgumentList " + ps_literal(subprocess.list2cmdline(list(restart_args))) if restart_args else ""
     script = data_dir() / "updates" / "apply-update.ps1"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(f'''$ErrorActionPreference = 'Stop'
@@ -94,7 +95,7 @@ try {{
         }} catch {{ Start-Sleep -Seconds 1 }}
     }}
     if (-not $done) {{ throw '无法替换程序；请关闭其他程序实例后重试。' }}
-    Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) -WindowStyle Hidden
+    Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target){arguments} -WindowStyle Normal
     '更新完成' | Set-Content -LiteralPath $log -Encoding UTF8
 }} catch {{
     $errorMessage = $_.Exception.Message
@@ -102,8 +103,23 @@ try {{
         Copy-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue
     }}
     $errorMessage | Set-Content -LiteralPath $log -Encoding UTF8
-    Start-Process -FilePath $target -WindowStyle Hidden -ErrorAction SilentlyContinue
+    Start-Process -FilePath $target -WindowStyle Normal -ErrorAction SilentlyContinue
 }}
 ''', encoding="utf-8-sig")
-    return subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], creationflags=subprocess.CREATE_NO_WINDOW)
+    environment = os.environ.copy()
+    # 重启必须重新解压单文件包，不能沿用即将被旧进程清理的 _MEIPASS。
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    frozen_dir = str(getattr(sys, "_MEIPASS", ""))
+    if frozen_dir:
+        environment["PATH"] = os.pathsep.join(p for p in environment.get("PATH", "").split(os.pathsep) if not p.lower().startswith(frozen_dir.lower()))
+        for key in ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH"):
+            if frozen_dir.lower() in environment.get(key, "").lower():
+                environment.pop(key, None)
+        import ctypes
+        ctypes.windll.kernel32.SetDllDirectoryW(None)
+    try:
+        return subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+    finally:
+        if frozen_dir:
+            ctypes.windll.kernel32.SetDllDirectoryW(frozen_dir)
 

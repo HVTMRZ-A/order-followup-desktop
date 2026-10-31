@@ -24,6 +24,15 @@ def main():
         report=dict(version=VERSION,pages=window.pages.count(),import_orders=len(parsed),import_models=len(parsed[0]["items"]),ssl=ssl.OPENSSL_VERSION,stored_orders=len(store.orders()))
         (data_dir()/"self-test.json").write_text(json.dumps(report,ensure_ascii=False),encoding="utf-8")
         window.quitting=True;window.close();window.tray.hide();store.db.close();return 0
+    if "--verify-update" in sys.argv:
+        if not os.environ.get("ORDER_WORKBENCH_DATA") or not getattr(sys,"frozen",False):
+            raise RuntimeError("Update verification requires a frozen EXE and isolated data directory")
+        from workbench.storage import Store
+        from workbench.updater import launch_replacement
+        store=Store();store.backup();store.db.close()
+        source=Path(sys.argv[sys.argv.index("--verify-update")+1]).resolve()
+        launch_replacement(source,restart_args=("--self-test",))
+        return 0
     lock=QLockFile(str(data_dir()/"app.lock"));lock.setStaleLockTime(0)
     if not lock.tryLock(100):
         QMessageBox.information(None,"订单跟进工作台","程序已经运行，请从系统托盘双击工作台图标打开。");return 0

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import time
+import subprocess
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -30,16 +31,26 @@ def main():
     store.save_daily("2026-10-31",{"分仓数据":{"state":"需要跟进","notes":"升级后必须保留"}})
     before_orders=store.orders();before_daily=store.daily_all();backup=store.backup();store.db.close()
     log=DATA/"updates"/"update-result.txt";log.unlink(missing_ok=True)
-    process=launch_replacement(source,target=target,wait_pid=987654321)
+    report=DATA/"self-test.json";report.unlink(missing_ok=True)
+    process=subprocess.Popen([str(target),"--verify-update",str(source)])
     process.wait(timeout=45)
-    for _ in range(30):
-        if log.exists():break
+    for _ in range(100):
+        if log.exists() and report.exists():break
         time.sleep(0.2)
     assert log.exists(),"未生成更新结果"
     assert "更新完成" in log.read_text(encoding="utf-8-sig"),log.read_text(encoding="utf-8-sig")
+    assert report.exists(),"更新后 EXE 未完成重新启动自检"
+    assert json.loads(report.read_text(encoding="utf-8"))["stored_orders"]==len(before_orders)
     assert hashlib.sha256(target.read_bytes()).hexdigest()==hashlib.sha256(source.read_bytes()).hexdigest()
     assert hashlib.sha256(target.with_name("OrderFollowup.previous.exe").read_bytes()).hexdigest()==old_hash
-    store=Store();assert store.orders()==before_orders;assert store.daily_all()==before_daily;store.db.close()
+    store=Store();assert store.orders()==before_orders
+    # 正常打开/关闭界面会刷新保存时间，并补齐当日三个栏目；业务内容必须保持。
+    for day, records in before_daily:
+        restored=store.daily(day)
+        for name, record in records.items():
+            for key in ("state","notes"):
+                assert restored[name].get(key)==record.get(key)
+    store.db.close()
     result=dict(replacement="passed",previous_exe="preserved",orders="preserved",daily="preserved",backup=str(backup))
     (ROOT/"outputs"/"upgrade-check.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
     print(json.dumps(result,ensure_ascii=True))
