@@ -26,7 +26,10 @@ def main():
                     production_detected=is_production_sheet(template),plan_columns=len(plan_rows(parsed[0])[0][0]) if plan_rows(parsed[0])[0] else 0,
                     plan_columns_expected=len(PLAN_COLUMNS),orders_columns=window.orders_table.columnCount(),
                     drag_ready=bool(window.acceptDrops() and window.drop_overlay is not None),
-                    todo_grouping=hasattr(window,"toggle_todo_group"),order_views=window.order_tabs.count())
+                    todo_grouping=hasattr(window,"toggle_todo_group"),order_views=window.order_tabs.count(),
+                    order_editing=hasattr(window.order_management_page,"edit_selected_item"),
+                    order_deletion=hasattr(window.order_management_page,"delete_selected_order"),
+                    recycle_bin=hasattr(store,"restore_deleted"))
         (data_dir()/"self-test.json").write_text(json.dumps(report,ensure_ascii=False),encoding="utf-8")
         window.quitting=True;window.close();window.tray.hide();store.db.close();return 0
     if "--verify-update" in sys.argv:

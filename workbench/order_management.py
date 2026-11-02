@@ -40,22 +40,36 @@ class OrderManagementWidget(QWidget):
                         ('加入计划总表',self.join_selected),('查看 / 导出原单',self.export_original),('补充原单资料',self.supplement)]:
             b=QPushButton(text);b.clicked.connect(fn);row.addWidget(b)
         daily=QPushButton('关联每日跟进');daily.clicked.connect(self.daily_for_selected);row.addWidget(daily)
-        box.addLayout(row);self.search=QLineEdit();self.search.setAcceptDrops(False);self.search.setPlaceholderText('搜索订单号、客户、型号、物料编码、产品要求……');self.search.textChanged.connect(self.refresh);box.addWidget(self.search)
+        box.addLayout(row)
+        edit_row=QHBoxLayout();self.selection_buttons=[]
+        for text,fn in [('编辑订单',self.open_selected),('编辑所选型号',self.edit_selected_item),
+                        ('删除所选型号',self.delete_selected_item),('删除整单',self.delete_selected_order)]:
+            b=QPushButton(text);b.clicked.connect(fn);edit_row.addWidget(b);self.selection_buttons.append(b)
+            if text.startswith('删除'):b.setObjectName('danger')
+        edit_row.addStretch();trash=QPushButton('回收站');trash.clicked.connect(self.open_trash);edit_row.addWidget(trash);box.addLayout(edit_row)
+        self.search=QLineEdit();self.search.setAcceptDrops(False);self.search.setPlaceholderText('搜索订单号、客户、型号、物料编码、产品要求……');self.search.textChanged.connect(self.refresh);box.addWidget(self.search)
         self.table=QTableWidget(0,len(HEADERS));self.table.setHorizontalHeaderLabels(HEADERS);self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setAlternatingRowColors(True);self.table.setAcceptDrops(False);self.table.viewport().setAcceptDrops(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for c in range(len(HEADERS)):self.table.setColumnWidth(c,125)
         self.table.setColumnWidth(2,190);self.table.setColumnWidth(3,90);self.table.setColumnWidth(4,360);self.table.setColumnWidth(5,60)
         self.table.cellDoubleClicked.connect(lambda r,c:self.open_selected());box.addWidget(self.table,1)
-        self.status=QLabel();box.addWidget(self.status);b=QPushButton('打开所选订单详情');b.clicked.connect(self.open_selected);box.addWidget(b)
+        self.status=QLabel();box.addWidget(self.status)
         self.relations=QLabel('选择订单可查看合同、BOM、分析、计划行及关联异常。');self.relations.setWordWrap(True);box.addWidget(self.relations)
         self.table.itemSelectionChanged.connect(self.show_relations)
+        self.show_relations()
 
     def selected(self):
         r=self.table.currentRow()
         if r<0:return None
         identity=self.table.item(r,0).data(Qt.ItemDataRole.UserRole)
         return next((o for o in self.main.store.orders() if o['id']==identity),None)
+
+    def selected_item(self):
+        order=self.selected();row=self.table.currentRow()
+        identity=self.table.item(row,0).data(Qt.ItemDataRole.UserRole+1) if row>=0 else None
+        return next((i for i in order['items'] if i['id']==identity),None) if order else None
 
     def dragEnterEvent(self,event):self.main.dragEnterEvent(event)
     def dragMoveEvent(self,event):self.main.dragMoveEvent(event)
@@ -64,6 +78,7 @@ class OrderManagementWidget(QWidget):
 
     def refresh(self,*args):
         selected=self.selected();selected_id=selected['id'] if selected else None
+        item=self.selected_item();item_id=item['id'] if item else None
         self.table.setRowCount(0);text=self.search.text().strip().lower();orders=self.main.store.orders()
         for order in orders:
             for item in order['items']:
@@ -74,14 +89,49 @@ class OrderManagementWidget(QWidget):
                 if text and text not in ' '.join(map(str,values)).lower():continue
                 r=self.table.rowCount();self.table.insertRow(r)
                 for c,v in enumerate(values):
-                    cell=QTableWidgetItem(str(v));cell.setToolTip(str(v));cell.setData(Qt.ItemDataRole.UserRole,order['id']);self.table.setItem(r,c,cell)
-        self.status.setText(f'已登记 {len(orders)} 个订单，当前显示 {self.table.rowCount()} 条型号明细。双击查看订单详情。')
+                    cell=QTableWidgetItem(str(v));cell.setToolTip(str(v));cell.setData(Qt.ItemDataRole.UserRole,order['id']);cell.setData(Qt.ItemDataRole.UserRole+1,item['id']);self.table.setItem(r,c,cell)
+        self.status.setText(f'已登记 {len(orders)} 个订单，当前显示 {self.table.rowCount()} 条型号明细。选择一行可编辑型号或整单；双击查看订单详情。')
         for r in range(self.table.rowCount()):
-            if self.table.item(r,0).data(Qt.ItemDataRole.UserRole)==selected_id:self.table.setCurrentCell(r,0);break
+            if self.table.item(r,0).data(Qt.ItemDataRole.UserRole)==selected_id and self.table.item(r,0).data(Qt.ItemDataRole.UserRole+1)==item_id:self.table.setCurrentCell(r,0);break
+        self.show_relations()
 
     def open_selected(self):
         o=self.selected()
         if o:self.main.edit_order(o)
+
+    def edit_selected_item(self):
+        order=self.selected();item=self.selected_item()
+        if not item:return
+        from .ui import ItemDialog
+        dialog=ItemDialog(item,self)
+        if not dialog.exec():return
+        updated=dialog.value()
+        order['items']=[updated if i['id']==item['id'] else i for i in order['items']]
+        try:self.main.store.save_order(order,'编辑型号：'+item['model'])
+        except Exception as exc:QMessageBox.warning(self,'保存失败',str(exc));return
+        if updated.get('analyzed') and not item.get('analyzed'):self.main.queue_analysis_check(order)
+        self.main.refresh();self.main.confirm_plan_join([order])
+
+    def delete_selected_item(self):
+        order=self.selected();item=self.selected_item()
+        if item:self.delete_selected(order,item['id'] if len(order['items'])>1 else None)
+
+    def delete_selected_order(self):
+        order=self.selected()
+        if order:self.delete_selected(order)
+
+    def delete_selected(self,order,item_id=None):
+        from .order_editing import DeleteOrderDialog
+        dialog=DeleteOrderDialog(self.main.store,order,item_id,self)
+        if not dialog.exec():return
+        try:self.main.store.delete_order(order['id'],item_id,dialog.clear_plan.isChecked())
+        except Exception as exc:QMessageBox.warning(self,'删除未完成',str(exc));return
+        self.main.load_daily();self.main.planbook_page.reload();self.main.refresh()
+        self.main.status.showMessage('已移入回收站，关联包材和订单待办已同步移除。',7000)
+
+    def open_trash(self):
+        from .order_editing import OrderTrashDialog
+        OrderTrashDialog(self.main).exec()
 
     def join_selected(self):
         o=self.selected()
@@ -94,6 +144,7 @@ class OrderManagementWidget(QWidget):
 
     def show_relations(self):
         order=self.selected()
+        for b in self.selection_buttons:b.setEnabled(bool(order))
         if not order:self.relations.setText('选择订单可查看合同、BOM、分析、计划行及关联异常。');return
         plan=self.main.store.planbook() or {};links=[l for l in plan.get('order_links',[]) if l['order_id']==order['id']]
         pending=sum(record.get('state')=='需要跟进' and order['id'] in record.get('order_ids',[]) for _,records in self.main.store.daily_all() for record in records.values())

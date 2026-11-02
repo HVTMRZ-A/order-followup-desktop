@@ -242,7 +242,7 @@ class ItemDialog(QDialog):
         root.setSpacing(0)
         root.addWidget(label("型号与确认项", "dialogTitle", False))
         root.addSpacing(5)
-        root.addWidget(label("勾选会立即改变待办与优先级；分析日期用于计算包材信息的 10 天期限。", "hint"))
+        root.addWidget(label("保存后更新型号资料、待办与优先级；分析日期用于计算包材信息的 10 天期限。", "hint"))
         root.addSpacing(18)
 
         self.model = QLineEdit(item["model"])
@@ -387,6 +387,7 @@ class OrderDialog(QDialog):
         super().__init__(parent)
         self.store = store
         self.order = copy.deepcopy(order or new_order())
+        self.clear_removed_plan_ids = set()
         self.saved = False
         self.setWindowTitle("订单详情" if order else "登记新订单")
         self.resize(1040, 720)
@@ -401,6 +402,7 @@ class OrderDialog(QDialog):
         root.addSpacing(14)
 
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.setDocumentMode(True)
         tabs.tabBar().setExpanding(False)
         tabs.tabBar().setDrawBase(False)
@@ -415,6 +417,7 @@ class OrderDialog(QDialog):
         for key, title, placeholder in [("number", "订单号 *", "例如 SO-2026-001"), ("customer", "客户", ""),
                                         ("customer_no", "客户编号", "生产单上的客订编号，如 D299"),
                                         ("owner", "订单经办人", ""), ("delivery_date", "要求交期", "YYYY-MM-DD（可留空）"),
+                                        ("plan_delivery_date", "计划完成日期", "YYYY-MM-DD（可留空）"),
                                         ("transport", "运输方式", "例如 1*40HQ"),
                                         ("attribute", "订单属性", "例如 新增 / 返单"),
                                         ("plan_serial", "计划序列号", "如 X2601352"),
@@ -429,6 +432,7 @@ class OrderDialog(QDialog):
                          ("计划序列号", self.fields["plan_serial"])])
         field_row(form, [("运输方式", self.fields["transport"]), ("订单属性", self.fields["attribute"]),
                          ("要求交期", self.fields["delivery_date"])])
+        field_row(form, [("计划完成日期", self.fields["plan_delivery_date"]), None])
         field_row(form, [("合同号", self.fields["contract_no"]), ("合同经办人", self.fields["contract_owner"]),
                          ("销售订单号", self.fields["sales_no"]), ("销售订单经办人", self.fields["sales_owner"])])
 
@@ -585,11 +589,16 @@ class OrderDialog(QDialog):
         if row < 0:
             return
         item = self.order["items"][row]
-        if any(material["item_id"] == item["id"] for material in self.order["materials"]):
-            QMessageBox.warning(self, "无法移除", "此型号有关联包材，请先处理包材记录。")
+        if len(self.order['items']) == 1:
+            QMessageBox.information(self, '最后一个型号', '订单至少保留一个型号。若要移除整单，请回到订单管理，点击“删除整单”。')
             return
-        if QMessageBox.question(self, "移除型号", f"移除 {item['model']}？保存订单后生效。") == QMessageBox.StandardButton.Yes:
-            self.order["items"].pop(row)
+        from .order_editing import DeleteOrderDialog
+        from .order_changes import remove_model
+        dialog = DeleteOrderDialog(self.store, self.order, item['id'], self, staged=True)
+        if dialog.exec():
+            self.order = remove_model(self.order, item['id'])
+            if dialog.clear_plan.isChecked():
+                self.clear_removed_plan_ids.add(item['id'])
             self.refresh()
 
     def add_material(self):
@@ -626,7 +635,7 @@ class OrderDialog(QDialog):
         self.order["contract"] = self.contract.isChecked()
         self.order["notes"] = self.notes.toPlainText()
         try:
-            self.store.save_order(self.order)
+            self.store.save_order(self.order, clear_removed_plan_ids=self.clear_removed_plan_ids)
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", "订单号已存在，请使用其他订单号。" if "UNIQUE" in str(exc) else str(exc))
             return
@@ -1633,6 +1642,8 @@ class MainWindow(QMainWindow):
         dialog = OrderDialog(self.store, order, self)
         if dialog.exec():
             if any(i.get('analyzed') and not prior.get(i['id']) for i in dialog.order['items']):self.queue_analysis_check(dialog.order)
+            self.load_daily()
+            self.planbook_page.reload()
             self.refresh()
             self.confirm_plan_join([dialog.order])
 

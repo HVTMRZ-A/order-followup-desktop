@@ -43,8 +43,9 @@ def validate_order(order):
     if not str(order.get("number", "")).strip():
         raise ValueError("请填写订单号")
     datetime.fromisoformat(order["received_at"])
-    if order.get("delivery_date"):
-        date.fromisoformat(order["delivery_date"])
+    for key in ('delivery_date', 'plan_delivery_date'):
+        if order.get(key):
+            date.fromisoformat(order[key])
     if not order.get("items"):
         raise ValueError("请至少添加一个型号")
     ids, models = set(), set()
