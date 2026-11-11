@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QCheckBox,QLabel,QPushButton,
  QTableWidget,QTableWidgetItem,QHeaderView,QAbstractItemView,QDialogButtonBox,QMessageBox)
 from .plan_sync import TARGETS,DEFAULT_TARGETS,build_preview,apply_preview
+from .inline_edit import enable_cell_editing
 
 
 class PlanJoinDialog(QDialog):
@@ -55,6 +56,10 @@ class PlanJoinDialog(QDialog):
         fields=list(row['values']);t=QTableWidget(len(fields),2);t.setHorizontalHeaderLabels(['字段','本次加入值'])
         for i,name in enumerate(fields):
             title=QTableWidgetItem(name);title.setFlags(Qt.ItemFlag.ItemIsEnabled);t.setItem(i,0,title);t.setItem(i,1,QTableWidgetItem(str(row['values'][name])))
+            locked=name in ('订单号','产品型号','公司型号','型号') or (row['sheet'] in ('最新','整体配件汇总','家用机订单') and name in ('订单数量','数量','未完工数量','未发货','剩余数量'))
+            if locked:
+                t.item(i,1).setFlags(t.item(i,1).flags() & ~Qt.ItemFlag.ItemIsEditable);t.item(i,1).setToolTip('此字段来自订单，可在订单管理或关联计划格直接修改。')
+        enable_cell_editing(t)
         t.horizontalHeader().setStretchLastSection(True);box.addWidget(t)
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText('保存资料');buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('取消')

@@ -135,6 +135,6 @@ def test_update_download_validates_content(tmp_path,monkeypatch):
     release={"tag_name":"v1.0.0","assets":[dict(name="OrderFollowup.exe",browser_download_url=url,digest="sha256:"+hashlib.sha256(content).hexdigest(),size=len(content))]}
     monkeypatch.setattr(u,"data_dir",lambda:tmp_path);monkeypatch.setattr(u.urllib.request,"urlopen",lambda *a,**k:io.BytesIO(content))
     target=u.download_release(release);assert target.read_bytes()==content
-    monkeypatch.setattr(u.urllib.request,"urlopen",lambda *a,**k:io.BytesIO(b"tampered"))
+    monkeypatch.setattr(u.urllib.request,"urlopen",lambda *a,**k:io.BytesIO(b"tampered".ljust(len(content),b"X")))
     with pytest.raises(ValueError,match="校验失败"):u.download_release(release)
     assert target.read_bytes()==content

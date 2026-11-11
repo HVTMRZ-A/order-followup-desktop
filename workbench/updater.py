@@ -5,10 +5,48 @@ import os
 import re
 import subprocess
 import sys
+import ssl
+import time
+import http.client
+import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from . import REPOSITORY, VERSION
 from .storage import data_dir
+
+DOWNLOAD_ATTEMPTS = 4
+NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError, http.client.HTTPException)
+
+
+def log_path():
+    return data_dir() / 'updates' / 'download-log.jsonl'
+
+
+def log_update(stage, **fields):
+    # 日志只记录阶段、字节数及错误类型，不记录订单、代理密码或临时签名 URL。
+    try:
+        path = log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(dict(at=datetime.now().isoformat(timespec='seconds'),
+                                         version=VERSION, stage=stage, **fields), ensure_ascii=False) + '\n')
+    except OSError:
+        pass  # 日志失败不改变下载和校验结果。
+
+
+def network_error(exc):
+    reason = getattr(exc, 'reason', exc)
+    if isinstance(exc, urllib.error.HTTPError):
+        return f'HTTP {exc.code}'
+    code = getattr(reason, 'winerror', None) or getattr(reason, 'errno', None)
+    if code in (10054, 104) or '10054' in str(reason):
+        return '连接被重置（WinError 10054 / ConnectionReset）'
+    if isinstance(reason, TimeoutError):
+        return '连接或读取超时'
+    if isinstance(reason, ssl.SSLError):
+        return 'TLS 连接失败：' + type(reason).__name__
+    return type(reason).__name__
 
 
 def version_tuple(value):
@@ -19,12 +57,18 @@ def version_tuple(value):
 
 
 def get_release():
+    log_update('check_start')
     req = urllib.request.Request(f"https://api.github.com/repos/{REPOSITORY}/releases/latest", headers={"User-Agent": "OrderFollowupDesktop", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=25) as response:
-        release = json.load(response)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            release = json.load(response)
+    except NETWORK_ERRORS as exc:
+        log_update('check_failed', error=network_error(exc))
+        raise
     if release.get("draft") or release.get("prerelease"):
         raise ValueError("更新源返回了非正式版本")
     version_tuple(release["tag_name"])
+    log_update('check_ok', release=release['tag_name'])
     return release
 
 
@@ -43,23 +87,107 @@ def asset_info(release):
 
 def download_release(release, progress=lambda message: None):
     asset = asset_info(release)
+    version_tuple(release['tag_name'])
+    size = asset.get('size')
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError('更新文件大小无效，已停止更新')
     target = data_dir() / "updates" / release["tag_name"] / "OrderFollowup.exe"
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".part")
-    digest = hashlib.sha256()
-    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "OrderFollowupDesktop"})
+    expected = asset['digest'][7:].lower()
+    metadata = partial.with_suffix('.part.json')
+    identity = dict(size=size, digest=expected, url=asset['browser_download_url'])
     try:
-        with urllib.request.urlopen(req, timeout=45) as response, partial.open("wb") as stream:
-            total = 0
-            while chunk := response.read(1024 * 1024):
-                stream.write(chunk); digest.update(chunk); total += len(chunk)
-                progress(f"正在下载：{total / 1048576:.1f} / {asset['size'] / 1048576:.1f} MB")
-        if total != asset["size"] or digest.hexdigest().lower() != asset["digest"][7:].lower():
-            raise ValueError("下载文件校验失败，请重新检查更新")
-        partial.replace(target)
-    finally:
+        reusable = metadata.exists() and json.loads(metadata.read_text(encoding='utf-8')) == identity
+    except (ValueError, OSError):
+        reusable = False
+    if not reusable or (partial.exists() and partial.stat().st_size > size):
         partial.unlink(missing_ok=True)
-    return target
+    metadata.write_text(json.dumps(identity), encoding='utf-8')
+    endpoints = [('GitHub 下载入口', asset['browser_download_url'])]
+    asset_id = asset.get('id')
+    if isinstance(asset_id, int) and not isinstance(asset_id, bool) and asset_id > 0:
+        endpoints.append(('GitHub 官方 API', f'https://api.github.com/repos/{REPOSITORY}/releases/assets/{asset_id}'))
+    last_error = None
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        offset = partial.stat().st_size if partial.exists() else 0
+        if offset == size:
+            progress('下载完成，正在校验 SHA-256……')
+            with partial.open('rb') as stream:
+                complete_digest = hashlib.file_digest(stream, 'sha256').hexdigest().lower()
+            if complete_digest == expected:
+                partial.replace(target)
+                metadata.unlink(missing_ok=True)
+                log_update('download_verified', release=release['tag_name'], bytes=size)
+                return target
+            partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            log_update('checksum_failed', release=release['tag_name'])
+            raise ValueError('下载文件校验失败，已丢弃损坏内容；现有程序未改变。请重新检查更新。')
+        name, url = endpoints[attempt % len(endpoints)]
+        headers = {'User-Agent': 'OrderFollowupDesktop', 'Accept': 'application/octet-stream', 'Accept-Encoding': 'identity'}
+        if offset:
+            headers['Range'] = f'bytes={offset}-'
+        progress(f"正在连接{name}（第 {attempt+1}/{DOWNLOAD_ATTEMPTS} 次），已下载 {offset/1048576:.2f} / {size/1048576:.2f} MB……")
+        log_update('download_connect', attempt=attempt+1, endpoint=name, bytes=offset)
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=20) as response:
+                status = getattr(response, 'status', 200)
+                if status == 206:
+                    match = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+                    if not match or int(match[1]) != offset or int(match[3]) != size or not offset <= int(match[2]) < size:
+                        raise http.client.HTTPException('续传范围不匹配')
+                elif status == 200:
+                    if offset:
+                        progress('服务器不支持续传，本次从头重新下载……')
+                    offset = 0
+                else:
+                    raise http.client.HTTPException('下载响应状态异常')
+                received = offset
+                last_emit = 0
+                # read1 在收到当前可用数据时就返回，慢速链路不用等满 1 MB 才更新界面。
+                read = getattr(response, 'read1', response.read)
+                with partial.open('ab' if offset else 'wb') as stream:
+                    while chunk := read(64 * 1024):
+                        if received + len(chunk) > size:
+                            raise ValueError('下载数据超出发布文件大小，已停止更新')
+                        stream.write(chunk)
+                        received += len(chunk)
+                        now = time.monotonic()
+                        if now - last_emit >= 0.25 or received == size:
+                            progress(f'正在下载：{received/1048576:.2f} / {size/1048576:.2f} MB（{received*100/size:.1f}%）')
+                            last_emit = now
+                if received != size:
+                    raise http.client.IncompleteRead(b'', size-received)
+        except NETWORK_ERRORS as exc:
+            last_error = network_error(exc)
+            count = partial.stat().st_size if partial.exists() else 0
+            log_update('download_interrupted', attempt=attempt+1, bytes=count, error=last_error)
+            if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                progress(f'{last_error}，保留已下载内容，准备重试……')
+                time.sleep(min(attempt+1, 3))
+                continue
+            break
+        except ValueError:
+            partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            log_update('download_invalid', attempt=attempt+1)
+            raise
+        # 传输成功后在本次请求内完成校验，不额外消耗重试次数。
+        progress('下载完成，正在校验 SHA-256……')
+        with partial.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest().lower()
+        if digest != expected:
+            partial.unlink(missing_ok=True)
+            metadata.unlink(missing_ok=True)
+            log_update('checksum_failed', release=release['tag_name'])
+            raise ValueError('下载文件校验失败，已丢弃损坏内容；现有程序未改变。请重新检查更新。')
+        partial.replace(target)
+        metadata.unlink(missing_ok=True)
+        log_update('download_verified', release=release['tag_name'], bytes=size)
+        return target
+    raise RuntimeError(f'更新下载失败：{last_error}。已尝试 {DOWNLOAD_ATTEMPTS} 次，保留下载进度；点击“检查新版本”可继续。详情见更新日志。')
 
 
 def launch_replacement(source, target=None, wait_pid=None, restart_args=()):

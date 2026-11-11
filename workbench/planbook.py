@@ -89,7 +89,10 @@ def read_planbook(path):
                 raise ValueError(f"{spec.get('name')} 的实际数据超出支持范围（50000 行、300 列）")
             sheets.append(dict(name=spec.get('name'),state=spec.get('state','visible'),member=member,
                                rows=maxrow,cols=maxcol,cells=cells,edits={},formulas_stale=False))
-    return dict(name=Path(path).name,source_path=str(Path(path).resolve()),sheets=sheets,epoch1904=epoch==MAC_EPOCH), source
+    payload = dict(name=Path(path).name,source_path=str(Path(path).resolve()),sheets=sheets,epoch1904=epoch==MAC_EPOCH)
+    from .plan_layout import ensure_layout
+    ensure_layout(payload, source)
+    return payload, source
 
 
 def displayed(sheet, address):
@@ -103,7 +106,9 @@ def displayed(sheet, address):
 
 
 def edit_cell(sheet,address,value):
-    entry=copy.deepcopy(sheet['cells'].get(address,{'s':0}))
+    from .plan_layout import anchor_cell
+    row,col=coordinate_to_tuple(address);row,col=anchor_cell(sheet,row,col);address=f'{get_column_letter(col)}{row}'
+    entry=copy.deepcopy(sheet['cells'].get(address,{'s':sheet.get('layout',{}).get('cell_styles',{}).get(address,0)}))
     if 'f' in entry:raise ValueError('原表公式格仅查看，请修改它所引用的输入格；导出后由 Excel 重算。')
     entry.pop('f',None);entry.pop('formula_attrs',None)
     entry['v']=value
@@ -116,19 +121,23 @@ def edit_cell(sheet,address,value):
     # 跨表公式也可能依赖此格，由调用者标记全工作簿过期。
 
 
-def export_planbook(path,payload,source):
+def export_planbook(path,payload,source,sheet_names=None):
     if payload.get('source_path') and Path(path).resolve()==Path(payload['source_path']).resolve():
         raise ValueError('请另存为新文件，不能覆盖导入的原计划总表。')
     target=io.BytesIO()
+    names=[s['name'] for s in payload['sheets']]
+    selected=set(names if sheet_names is None else sheet_names)
+    if not selected or not selected<=set(names):raise ValueError('请选择至少一张有效的工作表。')
+    subset=selected!=set(names)
     with ZipFile(io.BytesIO(source)) as original, ZipFile(target,'w',ZIP_DEFLATED) as result:
         wb=ET.fromstring(original.read('xl/workbook.xml'));relations=ET.fromstring(original.read('xl/_rels/workbook.xml.rels'))
         relation_map={r.get('Id'):r for r in relations};excluded=set();removed_ids=set()
         sheetlist=wb.find(TAG('sheets'))
         index_map={};visible_index=0
         for old_index,spec in enumerate(sheetlist):
-            if spec.get('state','visible')=='visible':index_map[old_index]=visible_index;visible_index+=1
+            if spec.get('state','visible')=='visible' and spec.get('name') in selected:index_map[old_index]=visible_index;visible_index+=1
         for spec in list(sheetlist):
-            if spec.get('state','visible') != 'visible':
+            if spec.get('state','visible') != 'visible' or spec.get('name') not in selected:
                 rid=spec.get('{'+REL+'}id');removed_ids.add(rid);link=relation_map[rid];member=link.get('Target')
                 excluded.add(member.lstrip('/') if member.startswith('/') else posixpath.normpath('xl/'+member));sheetlist.remove(spec);relations.remove(link)
         names=wb.find(TAG('definedNames'))
@@ -138,7 +147,12 @@ def export_planbook(path,payload,source):
                     old=int(name.get('localSheetId'))
                     if old not in index_map:names.remove(name)
                     else:name.set('localSheetId',str(index_map[old]))
-        changed={s['member']:s for s in payload['sheets'] if s.get('edits')}
+        for view in wb.findall(TAG('bookViews')+'/'+TAG('workbookView')):
+            for attribute in ('activeTab','firstSheet'):
+                if view.get(attribute) is not None:view.set(attribute,str(index_map.get(int(view.get(attribute)),0)))
+        for rel in list(relations):
+            if rel.get('Type','').endswith('/calcChain'):relations.remove(rel)
+        changed={s['member']:s for s in payload['sheets'] if s['name'] in selected and (s.get('edits') or s.get('format_edits') or s.get('dimension_edits'))}
         styles_original=original.read('xl/styles.xml');styles_root=ET.fromstring(styles_original);xfs=styles_root.find(TAG('cellXfs'));date_styles={}
         for sheet in changed.values():
             for entry in sheet['edits'].values():
@@ -146,18 +160,19 @@ def export_planbook(path,payload,source):
                     base=entry.get('s',0);xf=copy.deepcopy(xfs[base]);xf.set('numFmtId','14');xf.set('applyNumberFormat','1')
                     date_styles[base]=len(xfs);xfs.append(xf)
         if date_styles:xfs.set('count',str(len(xfs)))
-        for info in original.infolist():
-            if info.filename in excluded or info.filename=='xl/calcChain.xml':continue
-            data=original.read(info.filename)
-            if info.filename in changed:
-                sheet=changed[info.filename];root=ET.fromstring(data);grid=root.find(TAG('sheetData'))
+        from .cell_format import ExportStyles,export_format
+        formatter=ExportStyles(styles_root)
+        # ZIP 条目可能先出现 styles.xml；先生成全部样式，再写任何条目。
+        rendered={}
+        for member,sheet in changed.items():
+                data=original.read(member);root=ET.fromstring(data);grid=root.find(TAG('sheetData'))
                 rows={int(row.get('r')):row for row in grid};cells={c.get('r'):c for row in grid for c in row}
                 for address,entry in sheet['edits'].items():
                     r,c=coordinate_to_tuple(address)
                     if r not in rows:
                         rows[r]=ET.Element(TAG('row'),r=str(r));grid.append(rows[r])
                     node=cells.get(address)
-                    if node is None:node=ET.SubElement(rows[r],TAG('c'),r=address,s=str(entry.get('s',0)))
+                    if node is None:node=ET.SubElement(rows[r],TAG('c'),r=address,s=str(entry.get('s',0)));cells[address]=node
                     for child in list(node):
                         if child.tag in (TAG('f'),TAG('v'),TAG('is')):node.remove(child)
                     value=entry.get('v');node.attrib.pop('t',None)
@@ -169,12 +184,24 @@ def export_planbook(path,payload,source):
                     elif isinstance(value,(int,float)):ET.SubElement(node,TAG('v')).text=str(value)
                     else:
                         node.set('t','inlineStr');text=ET.SubElement(ET.SubElement(node,TAG('is')),TAG('t'));text.set('{http://www.w3.org/XML/1998/namespace}space','preserve');text.text=str(value)
+                export_format(sheet,root,grid,rows,cells,formatter)
                 grid[:]=sorted(grid,key=lambda row:int(row.get('r')))
                 for row in grid:row[:]=sorted(row,key=lambda cell:coordinate_to_tuple(cell.get('r'))[1])
                 dim=root.find(TAG('dimension'))
                 if dim is not None:dim.set('ref',f"A1:{get_column_letter(sheet['cols'])}{sheet['rows']}")
-                data=xml_bytes(root,data)
-            elif info.filename=='xl/styles.xml' and date_styles:
+                rendered[member]=xml_bytes(root,data)
+        keep=None
+        if subset:
+            from .plan_export import retained_parts,compact_strings,compact_properties
+            keep=retained_parts(original,relations)
+            compact_strings(original,[s['member'] for s in payload['sheets'] if s['name'] in selected],rendered,xml_bytes)
+            compact_properties(original,[s['name'] for s in payload['sheets'] if s['name'] in selected],rendered,xml_bytes)
+        for info in original.infolist():
+            if info.filename in excluded or info.filename=='xl/calcChain.xml':continue
+            if keep is not None and info.filename not in keep:continue
+            data=original.read(info.filename)
+            if info.filename in rendered:data=rendered[info.filename]
+            elif info.filename=='xl/styles.xml' and (date_styles or formatter.cache):
                 data=xml_bytes(styles_root,styles_original)
             elif info.filename=='xl/workbook.xml':
                 calc=wb.find(TAG('calcPr'))
@@ -187,7 +214,8 @@ def export_planbook(path,payload,source):
             elif info.filename=='[Content_Types].xml':
                 root=ET.fromstring(data)
                 for node in list(root):
-                    if node.get('PartName','').lstrip('/') in excluded | {'xl/calcChain.xml'}:root.remove(node)
+                    part=node.get('PartName','').lstrip('/')
+                    if part in excluded | {'xl/calcChain.xml'} or part and keep is not None and part not in keep:root.remove(node)
                 data=xml_bytes(root,data)
             # 未修改的 XML、图表、图片、外部链接等逐项保留。
             result.writestr(info,data)

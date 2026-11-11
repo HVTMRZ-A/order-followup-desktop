@@ -361,11 +361,13 @@ QComboBox QAbstractItemView { background: #ffffff; border: 1px solid #dbe3ef; bo
 QComboBox QAbstractItemView::item { min-height: 26px; padding: 2px 6px; border-radius: 6px; }
 
 /* ---------- 表格 ---------- */
-QTableWidget { background: #ffffff; border: none; gridline-color: #eef2f8;
+QTableWidget { background: #ffffff; alternate-background-color: #ffffff; border: none; gridline-color: #eef2f8;
     selection-background-color: #eff4ff; selection-color: #16202f; outline: none; }
 QTableWidget::item { padding: 0 6px; border: none; }
 QTableWidget::item:hover { background: #f8fbff; }
-QTableWidget::item:selected { background: #eff4ff; color: #16202f; }
+QTableWidget::item:selected { background: #dce9ff; color: #16202f; }
+QTableWidget::indicator { width:17px; height:17px; border:2px solid #7d90ac; border-radius:4px; background:#ffffff; }
+QTableWidget::indicator:checked { background:#245dce; border-color:#245dce; image:url(__ASSETS__/check.png); }
 QHeaderView { background: transparent; }
 QHeaderView::section { background: #f8fafd; color: #6b7891; padding: 0 6px; border: none;
     border-bottom: 1px solid #e3e9f2; font-size: 11.5px; font-weight: 600; }
@@ -420,3 +422,29 @@ def stylesheet():
 
 
 STYLE = stylesheet()
+
+
+def export_scope_stylesheet():
+    """导出窗口独立指定明暗状态，避免 Windows 深色原生控件混入。"""
+    assets=Path(_check_asset()).parent.as_posix()
+    return '''
+QDialog#exportScopeDialog { background:#f4f7fc; color:#16202f; }
+QDialog#exportScopeDialog QLabel { color:#24344c; background:transparent; }
+QDialog#exportScopeDialog QRadioButton { color:#16202f; background:transparent; spacing:9px; padding:4px 0; }
+QDialog#exportScopeDialog QRadioButton::indicator { width:18px; height:18px; border:2px solid #7d90ac; border-radius:11px; background:#ffffff; }
+QDialog#exportScopeDialog QRadioButton::indicator:checked { border-color:#245dce;
+ background:qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5, stop:0 #245dce, stop:0.55 #245dce, stop:0.6 #ffffff, stop:1 #ffffff); }
+QListWidget#exportSheetList { background:#ffffff; alternate-background-color:#ffffff; color:#16202f;
+ border:1px solid #b8c7dd; border-radius:8px; padding:4px; outline:none; selection-background-color:#e7efff; selection-color:#16202f; }
+QListWidget#exportSheetList:disabled { background:#f6f8fb; color:#53657d; }
+QListWidget#exportSheetList::item { color:#16202f; min-height:28px; padding:4px 8px; border:1px solid transparent; border-radius:5px; }
+QListWidget#exportSheetList::item:hover { background:#f1f5fd; }
+QListWidget#exportSheetList::item:selected { color:#16202f; background:#e7efff; border-color:#87aef0; }
+QListWidget#exportSheetList::item:disabled { color:#53657d; background:#f6f8fb; }
+QListWidget#exportSheetList::indicator { width:18px; height:18px; border:2px solid #7d90ac; border-radius:4px; background:#ffffff; }
+QListWidget#exportSheetList::indicator:checked { background:#245dce; border-color:#245dce; image:url(__ASSETS__/check.png); }
+QListWidget#exportSheetList::indicator:checked:disabled { background:#647b9b; border-color:#647b9b; image:url(__ASSETS__/check.png); }
+QListWidget#exportSheetList::indicator:unchecked:disabled { background:#ffffff; border-color:#91a0b5; }
+QLabel#exportSelectionSummary { color:#174da5; font-weight:600; }
+QLabel#exportSelectionHint { color:#53657d; }
+'''.replace('__ASSETS__',assets)

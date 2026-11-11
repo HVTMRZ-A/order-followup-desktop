@@ -5,8 +5,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFontMetrics, QIcon
+from PySide6.QtCore import QDate, QDateTime, QSize, Qt, QThread, QTimer, QUrl, Signal,QSignalBlocker
+from PySide6.QtGui import QColor, QCursor, QDesktopServices, QFontMetrics, QIcon,QAction,QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
                                QDateEdit, QDateTimeEdit, QDialog, QFileDialog,
                                QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QHeaderView, QLabel,
@@ -22,6 +22,8 @@ from .production import (HOME_COLUMNS, PACKAGING_COLUMNS, PARTS_COLUMNS, PLAN_CO
                         export_plan_book, home_rows, next_serial, packaging_rows, parts_rows,
                         plan_rows, read_plan_serials)
 from .storage import Store, data_dir
+from .inline_edit import enable_cell_editing,iso_date
+from .ux_controls import FormatToggle,OrderSelectionDialog
 from .theme import (ACCENT, DANGER, FAINT, INK, INK_SOFT, LINE, MUTED, STYLE, SUCCESS, WARN,
                     BadgeDelegate, ProgressDelegate, StatusDelegate, app_icon, brand_mark, icon, pixmap)
 
@@ -761,9 +763,8 @@ class ImportPreviewDialog(QDialog):
         box.addSpacing(14)
         footer = QHBoxLayout()
         footer.setSpacing(8)
-        footer.addWidget(label(f"将新增 {len(orders)} 个订单、{total} 个型号；已有订单不会被覆盖。", "hint"), 1)
+        footer.addWidget(label(f"将新增 {len(orders)} 个订单、{total} 个型号；下一步确认加入计划总表。", "hint"), 1)
         footer.addWidget(button("取消", self.reject))
-        footer.addWidget(button("导入并导出计划总表", self.accept_with_export))
         footer.addWidget(button("确认导入", self.accept, "primary"))
         box.addLayout(footer)
 
@@ -845,6 +846,8 @@ class MainWindow(QMainWindow):
     def __init__(self, store=None):
         super().__init__()
         self.store = store or Store()
+        from .edit_history import EditHistory
+        self.edit_history=EditHistory(self.store,self)
         self.setWindowTitle(f"{APP_NAME} · v{VERSION}")
         self.setWindowIcon(app_icon())
         self.resize(1360, 880)
@@ -936,6 +939,18 @@ class MainWindow(QMainWindow):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
+        self.undo_action=QAction('撤销',self);self.undo_action.setShortcut(QKeySequence('Ctrl+Z'))
+        self.redo_action=QAction('重做',self);self.redo_action.setShortcuts([QKeySequence('Ctrl+Y'),QKeySequence('Ctrl+Shift+Z')])
+        self.undo_action.triggered.connect(lambda:self.replay_edit(False));self.redo_action.triggered.connect(lambda:self.replay_edit(True))
+        self.addAction(self.undo_action);self.addAction(self.redo_action)
+        from PySide6.QtWidgets import QToolButton
+        history_bar=QWidget();history_box=QHBoxLayout(history_bar);history_box.setContentsMargins(24,8,24,0)
+        for action in (self.undo_action,self.redo_action):
+            control=QToolButton();control.setDefaultAction(action)
+            control.setStyleSheet('QToolButton {background:#ffffff;color:#253956;border:1px solid #d6e0f0;border-radius:7px;padding:5px 14px;} QToolButton:hover {background:#eff4ff;} QToolButton:disabled {color:#97a6bc;background:#f5f7fb;}')
+            history_box.addWidget(control)
+        history_box.addStretch();history_box.addWidget(label('Ctrl+Z 撤销 · Ctrl+Y 重做','meta',False));content_layout.addWidget(history_bar)
+        self.edit_history.changed.connect(self.update_history_actions);self.update_history_actions()
         content_layout.addWidget(self.pages, 1)
         self.status = StatusStrip("数据保存在本机  ·  自然日规则  ·  包材交期提醒 09:00")
         content_layout.addWidget(self.status)
@@ -980,6 +995,21 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.load_daily()
         QTimer.singleShot(1800, self.tick)
+
+    def update_history_actions(self):
+        for action,stack,name in ((self.undo_action,self.edit_history.undo_stack,'撤销'),(self.redo_action,self.edit_history.redo_stack,'重做')):
+            action.setEnabled(bool(stack));action.setToolTip((name+'：'+stack[-1]['label']) if stack else '暂无可'+name+'的修改')
+
+    def replay_edit(self,redo=False):
+        # 正在编辑的文字使用输入框自身的撤销，不提交半成品。
+        focus=QApplication.focusWidget()
+        if isinstance(focus,(QLineEdit,QTextEdit)) and not focus.isReadOnly():
+            focus.redo() if redo else focus.undo();return
+        try:
+            text=self.edit_history.redo() if redo else self.edit_history.undo()
+            if text:
+                self.load_daily();self.planbook_page.reload();self.refresh();self.status.showMessage(text,7000)
+        except Exception as exc:self.status.showMessage('未执行：'+str(exc),10000)
 
     # ---------- 拖拽导入 ----------
     def build_drop_overlay(self):
@@ -1083,7 +1113,7 @@ class MainWindow(QMainWindow):
 
     # ---------- 页面 ----------
     def dashboard(self):
-        body = self.page("今日待办", "按优先级排列，双击任意一行进入订单详情。",
+        body = self.page("今日待办", "选择事项后点击下方处理按钮，也可勾选确认框；需要补资料的事项会打开对应窗口。",
                          [button("导入订单", self.import_orders, icon_name="import"),
                           button("登记新订单", lambda: self.edit_order(), "primary", "plus")])
 
@@ -1111,6 +1141,8 @@ class MainWindow(QMainWindow):
             shadow(frame)
             stats.addWidget(frame, 1)
         body.addLayout(stats)
+        row=QHBoxLayout();self.todo_search=QLineEdit();self.todo_search.setPlaceholderText('搜索订单、客户、型号、经办人或待办内容');self.todo_search.setClearButtonEnabled(True);self.todo_search.textChanged.connect(self.refresh);row.addWidget(self.todo_search,1)
+        self.todo_filter=QComboBox();self.todo_filter.addItems(['全部待办','仅高优先级']);self.todo_filter.currentIndexChanged.connect(self.refresh);row.addWidget(self.todo_filter);body.addLayout(row)
 
         self.todo = table(["优先级", "订单号", "客户", "型号 / 范围", "待办事项", "经办人"],
                           widths=[76, 142, 112, 132, 0, 82], stretch=4)
@@ -1118,18 +1150,21 @@ class MainWindow(QMainWindow):
         self.todo.cellDoubleClicked.connect(lambda row, col: self.open_identity(self.todo, row))
         self.todo.cellClicked.connect(self.toggle_todo_group)
         self.todo.itemChanged.connect(self.todo_checkbox_changed)
+        self.todo.itemSelectionChanged.connect(self.show_todo_selection)
         self.todo.setToolTip("勾选事项前的确认框可直接确认；加入计划表会打开预览。单击组头展开，双击查看详情。")
         frame, self.todo_meta = self.table_card("待办清单", self.todo, "0 项")
         self.empty = label("暂无待办。登记或导入订单后，未完成事项会自动列在这里。", "muted")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         frame.layout().addWidget(self.empty, 1)
         body.addWidget(frame, 1)
+        self.todo_selection=label('先选择一条待办，可查看完整事项并处理。','hint');self.todo_selection.setTextFormat(Qt.TextFormat.PlainText);body.addWidget(self.todo_selection)
+        row=QHBoxLayout();self.todo_process=button('处理所选事项',self.process_selected_todo,'primary','check');self.todo_process.setEnabled(False);row.addWidget(self.todo_process)
+        self.todo_detail=button('查看 / 修改所属订单',self.open_selected_todo_detail);self.todo_detail.setEnabled(False);row.addWidget(self.todo_detail);row.addStretch();body.addLayout(row)
 
     def orders_page(self):
         body = self.page("订单登记与跟进", "查看已登记订单，选择型号或整单进入详情确认。",
                          [button("导入模板", self.template, icon_name="template"),
                           button("导入订单表", self.import_orders, icon_name="import"),
-                          button("导出计划总表", self.export_plan_menu, icon_name="export"),
                           button("新订单", lambda: self.edit_order(), "primary", "plus")])
 
         toolbar = QHBoxLayout()
@@ -1211,23 +1246,85 @@ class MainWindow(QMainWindow):
             self.order_actions_page.hide()
 
     def materials_page(self):
-        body = self.page("包材跟进", "请购数量 = 产品数量 × 单件用量。双击记录可进入订单，更新交期与到料。")
+        self.material_detail_button=button('编辑包材详情',self.edit_selected_material);self.material_order_button=button('编辑所属订单',self.edit_material_order)
+        body = self.page("包材跟进", "单击选择，直接键入替换；双击或 F2 编辑原内容，回车保存。请购数量及未到数量自动计算。",
+                         [self.material_detail_button,self.material_order_button])
         row = QHBoxLayout()
         row.setSpacing(10)
         self.material_filter = QComboBox()
-        self.material_filter.addItems(["全部包材", "未到齐", "已到齐"])
+        self.material_filter.addItems(["全部包材", "未到齐", "已到齐",'已逾期'])
         self.material_filter.setMinimumWidth(118)
         self.material_filter.currentIndexChanged.connect(self.refresh)
         row.addWidget(self.material_filter)
-        row.addStretch(1)
+        self.material_search=QLineEdit();self.material_search.setPlaceholderText('搜索订单、型号、包材、请购单号或经办人');self.material_search.setClearButtonEnabled(True);self.material_search.textChanged.connect(self.refresh);row.addWidget(self.material_search,1)
         row.addWidget(label("到齐后自动停止提醒", "meta", False))
         body.addLayout(row)
 
-        self.material_table = table(["订单号", "型号", "包材", "请购数量", "单位", "已到", "未到", "预计交期", "提醒日 09:00", "请购单号"],
-                                    widths=[136, 132, 0, 92, 56, 66, 66, 104, 112, 128], stretch=2, right=(3, 5, 6))
-        self.material_table.cellDoubleClicked.connect(lambda row, col: self.open_identity(self.material_table, row))
+        self.material_table = table(["订单号", "型号", "包材", "请购数量", "单位", "已到", "未到", "预计交期", "提醒日 09:00", "请购单号",'单件用量'],
+                                    widths=[136, 132, 0, 92, 56, 66, 66, 104, 112, 128,86], stretch=2, right=(3, 5, 6,10))
+        enable_cell_editing(self.material_table)
+        from .format_controls import ViewFormatting,FormatBar
+        self.material_formatter=ViewFormatting(self.material_table,self,'materials');self.material_format_bar=FormatBar(self.material_formatter)
+        self.material_format_toggle=FormatToggle(self.material_format_bar,self.store,'materials');row.insertWidget(row.count()-1,self.material_format_toggle)
+        body.addWidget(self.material_format_bar)
+        self.material_table.itemChanged.connect(self.inline_material_changed)
+        self.material_table.itemSelectionChanged.connect(self.show_material_selection)
         frame, self.material_meta = self.table_card("包材明细", self.material_table, "")
         body.addWidget(frame, 1)
+        self.material_selection=label('选择包材可查看所属订单和剩余数量。','hint');self.material_selection.setTextFormat(Qt.TextFormat.PlainText);body.addWidget(self.material_selection);self.show_material_selection()
+
+    def show_material_selection(self):
+        order,material=self.selected_material()
+        for control in (self.material_detail_button,self.material_order_button):control.setEnabled(material is not None)
+        if not hasattr(self,'material_selection'):return
+        if material is None:self.material_selection.setText('选择包材可查看所属订单和剩余数量。');return
+        model=next(i['model'] for i in order['items'] if i['id']==material['item_id']);missing=max(0,demand(order,material)-updater_decimal(material.get('arrived','0')))
+        self.material_selection.setText(f"{order['number']}  /  {model}  /  {material['name']}：还缺 {fmt(missing)} {material.get('unit','个')}；预计交期 {material.get('due_date') or '未填'}")
+
+    def selected_material(self):
+        row=self.material_table.currentRow()
+        if row<0:return None,None
+        cell=self.material_table.item(row,0)
+        order=next((o for o in self.store.orders() if o['id']==cell.data(Qt.ItemDataRole.UserRole)),None)
+        material=next((m for m in (order or {}).get('materials',[]) if m['id']==cell.data(Qt.ItemDataRole.UserRole+1)),None)
+        return order,material
+
+    def edit_material_order(self):
+        order,material=self.selected_material()
+        if order:self.edit_order(order)
+
+    def edit_selected_material(self):
+        order,material=self.selected_material()
+        if not material:return
+        dialog=MaterialDialog(order,material,self)
+        if dialog.exec():
+            snapshot=self.edit_history.capture([order['id']])
+            order['materials']=[dialog.material if m['id']==material['id'] else m for m in order['materials']]
+            self.store.save_order(order,'编辑包材详情',require_plan_review=False)
+            self.edit_history.record('包材详情',snapshot,review=False);self.refresh()
+
+    def inline_material_changed(self,cell):
+        fields={2:'name',4:'unit',5:'arrived',7:'due_date',8:'remind_date',9:'request_no',10:'usage'}
+        key=fields.get(cell.column());old=cell.data(Qt.ItemDataRole.UserRole+3)
+        if key is None or old is None or cell.text()==old:return
+        order=next((o for o in self.store.orders() if o['id']==cell.data(Qt.ItemDataRole.UserRole)),None)
+        material=next((m for m in (order or {}).get('materials',[]) if m['id']==cell.data(Qt.ItemDataRole.UserRole+1)),None)
+        if material is None:return
+        try:
+            snapshot=self.edit_history.capture([order['id']])
+            value=cell.text().strip()
+            if key in ('due_date','remind_date'):value=iso_date(value)
+            material[key]=value
+            self.store.save_order(order,'包材明细直接修改：'+key,require_plan_review=False)
+            self.edit_history.record('包材：'+self.material_table.horizontalHeaderItem(cell.column()).text(),snapshot,review=False)
+        except Exception as exc:
+            with QSignalBlocker(self.material_table):cell.setText(old)
+            self.status.showMessage('未保存：'+str(exc),10000);return
+        with QSignalBlocker(self.material_table):cell.setData(Qt.ItemDataRole.UserRole+3,cell.text())
+        def finish():
+            if self.quitting:return
+            self.refresh();self.status.showMessage('包材修改已保存，需求、未到数量和提醒已同步。',7000)
+        QTimer.singleShot(0,finish)
 
     def daily_page(self):
         body = self.page("每日跟进", "数据在其他系统刷新；这里只记录检查结果、是否需要跟进及处理进展。未解决事项会并入今日待办。",
@@ -1264,6 +1361,7 @@ class MainWindow(QMainWindow):
             layout.addWidget(notes, 1)
             links=QLineEdit();links.setPlaceholderText('关联订单号，多个用逗号分隔');links.setMinimumWidth(200);links.editingFinished.connect(self.autosave_daily)
             layout.addWidget(links,1);self.daily_order_links[key]=links
+            choose=button('选择订单',lambda checked=False,k=key:self.choose_daily_orders(k));layout.addWidget(choose)
             body.addWidget(frame)
             self.daily_widgets[key] = (state, notes)
             state.currentIndexChanged.connect(self.autosave_daily)
@@ -1277,8 +1375,18 @@ class MainWindow(QMainWindow):
         self.daily_history.cellDoubleClicked.connect(self.open_daily_history)
         history_frame, _ = panel(self.daily_history, "近 7 天记录", "双击可切换到该日期")
         body.addWidget(history_frame, 1)
+        body.addWidget(button('修改所选日期的跟进记录',lambda:self.open_daily_history(self.daily_history.currentRow()) if self.daily_history.currentRow()>=0 else None))
         self.current_daily_day = date.today().isoformat()
         self.loading_daily = False
+
+    def choose_daily_orders(self,key):
+        orders=self.store.orders()
+        if not orders:QMessageBox.information(self,'暂无订单','请先在订单管理中导入或登记订单。');return
+        field=self.daily_order_links[key];numbers=[n for n in re.split(r'[,，、;；\s]+',field.text().strip()) if n]
+        lookup={o['number']:o['id'] for o in orders};dialog=OrderSelectionDialog(orders,[lookup[n] for n in numbers if n in lookup],self)
+        if not dialog.exec():return
+        selected=set(dialog.selected_ids);unmatched=[n for n in numbers if n not in lookup]
+        field.setText(','.join([o['number'] for o in orders if o['id'] in selected]+unmatched));self.save_daily(silent=True)
 
     def settings_page(self):
         body = self.page("设置与更新", f"{APP_NAME}  v{VERSION}  ·  Windows 桌面版")
@@ -1363,6 +1471,8 @@ class MainWindow(QMainWindow):
                                                   icon_name="external")))
         self.update_status = label("尚未检查更新。", "hint")
         version_layout.addWidget(self.update_status)
+        version_layout.addLayout(ghost_row(button('打开更新日志', self.open_update_log),
+                                           button('打开手动下载页', lambda: QDesktopServices.openUrl(QUrl(f'https://github.com/{REPOSITORY}/releases/latest')))))
         version_layout.addStretch(1)
         right.addWidget(version)
         right.addStretch(1)
@@ -1373,11 +1483,16 @@ class MainWindow(QMainWindow):
     def refresh(self, *args):
         if not hasattr(self, "material_table"):
             return
+        if self.material_table.state()==QAbstractItemView.State.EditingState:return
+        current_material=self.material_table.item(self.material_table.currentRow(),0) if self.material_table.currentRow()>=0 else None
+        material_selection=(current_material.data(Qt.ItemDataRole.UserRole),current_material.data(Qt.ItemDataRole.UserRole+1),self.material_table.currentColumn()) if current_material else None
+        material_scroll=(self.material_table.verticalScrollBar().value(),self.material_table.horizontalScrollBar().value())
+        material_ranges=self.material_table.selectedRanges()
+        material_blocker=QSignalBlocker(self.material_table)
         orders = self.store.orders()
         orders.sort(key=lambda order: (all_checked(order, "completed"),
                                        -max((reminder["level"] for reminder in reminders(order)), default=0)))
         self.by_id = {order["id"]: order for order in orders}
-        self.todo.setRowCount(0)
         self.orders_table.setRowCount(0)
         self.parts_table.setRowCount(0)
         self.home_table.setRowCount(0)
@@ -1455,13 +1570,21 @@ class MainWindow(QMainWindow):
                 mode = self.material_filter.currentIndex()
                 if mode == 1 and missing_quantity <= 0 or mode == 2 and missing_quantity > 0:
                     continue
+                if mode==3 and not (missing_quantity>0 and material.get('due_date') and date.fromisoformat(material['due_date'])<date.today()):continue
                 model = next(item["model"] for item in order["items"] if item["id"] == material["item_id"])
+                query=self.material_search.text().strip().casefold()
+                if query and query not in ' '.join(str(v) for v in [order['number'],order.get('customer',''),order.get('customer_no',''),order.get('owner',''),model,*[material.get(k,'') for k in ('name','unit','request_no','buyer','notes','due_date')]]).casefold():continue
                 row = self.material_table.rowCount()
                 put(self.material_table, row,
                     [order["number"], model, material["name"], fmt(quantity), material.get("unit", "个"),
                      fmt(arrived), fmt(missing_quantity), material.get("due_date", ""),
-                     material.get("remind_date") or material.get("due_date", ""), material.get("request_no", "")],
+                     material.get("remind_date") or material.get("due_date", ""), material.get("request_no", ""),material['usage']],
                     order["id"])
+                for c in range(self.material_table.columnCount()):
+                    cell=self.material_table.item(row,c);cell.setData(Qt.ItemDataRole.UserRole+1,material['id']);cell.setData(Qt.ItemDataRole.UserRole+3,cell.text())
+                    if c not in (2,4,5,7,8,9,10):
+                        cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        cell.setToolTip('按产品数量和用量自动计算；可修改单件用量或编辑所属订单。' if c in (3,6) else '点击“编辑所属订单”修改订单或型号。')
                 align_numbers(self.material_table, row, (3, 5, 6))
                 due_date = material.get("due_date")
                 if missing_quantity > 0 and due_date and date.fromisoformat(due_date) < date.today():
@@ -1473,19 +1596,31 @@ class MainWindow(QMainWindow):
                     daily_pending += 1
                     related='、'.join(self.by_id[i]['number'] for i in record.get('order_ids',[]) if i in self.by_id)
                     tasks.append((1, related or "每日记录", day, key, record.get("notes") or "需要跟进", "", f"daily:{day}"))
-        self.render_todo(tasks)
+        keyword=self.todo_search.text().strip().casefold();priority_only=self.todo_filter.currentIndex()==1
+        shown_tasks=[t for t in tasks if (not priority_only or t[0]>=2) and (not keyword or keyword in ' '.join(str(v) for v in t[:6]).casefold())]
+        self.render_todo(shown_tasks)
         for widget, value in zip(self.stats, [active, elevated, waiting, daily_pending]):
             widget.setText(str(value))
-        self.empty.setVisible(not tasks)
-        self.todo.setVisible(bool(tasks))
-        self.todo_meta.setText(f"{len(tasks)} 项待处理")
+        self.empty.setVisible(not shown_tasks);self.empty.setText('没有匹配的待办，请调整搜索或优先级筛选。' if tasks and not shown_tasks else '暂无待办。登记或导入订单后，未完成事项会自动列在这里。')
+        self.todo.setVisible(bool(shown_tasks))
+        self.todo_meta.setText(f"显示 {len(shown_tasks)} / 共 {len(tasks)} 项待处理")
         self.side_meta.setText(f"进行中 {active} 单 · 待办 {len(tasks)} 项")
         shown = self.orders_table.rowCount()
         self.order_count.setText(f"显示 {shown} 行 / 共 {len(orders)} 单")
         self.parts_meta.setText(f"{self.parts_table.rowCount()} 行")
         self.home_meta.setText(f"{self.home_table.rowCount()} 行")
         self.pack_meta.setText(f"{self.pack_table.rowCount()} 行")
-        self.material_meta.setText(f"未到齐 {missing_total} 项")
+        self.material_meta.setText(f"当前 {self.material_table.rowCount()} 项 · 全部未到齐 {missing_total} 项")
+        if material_selection:
+            for r in range(self.material_table.rowCount()):
+                cell=self.material_table.item(r,0)
+                if (cell.data(Qt.ItemDataRole.UserRole),cell.data(Qt.ItemDataRole.UserRole+1))==material_selection[:2]:
+                    self.material_table.setCurrentCell(r,max(0,material_selection[2]));break
+        self.material_table.verticalScrollBar().setValue(material_scroll[0]);self.material_table.horizontalScrollBar().setValue(material_scroll[1])
+        for area in material_ranges:
+            if area.bottomRow()<self.material_table.rowCount():self.material_table.setRangeSelected(area,True)
+        self.material_formatter.apply_saved()
+        self.show_material_selection()
         self.order_management_page.refresh()
 
     def open_identity(self, widget, row):
@@ -1503,9 +1638,57 @@ class MainWindow(QMainWindow):
             self.edit_order(self.by_id.get(identity))
 
     def render_todo(self, tasks):
+        current=self.todo.currentRow();cell=self.todo.item(current,4) if current>=0 else None
+        selected=cell.data(Qt.ItemDataRole.UserRole+2) if cell else None
+        group=self.todo.item(current,0).data(Qt.ItemDataRole.UserRole) if current>=0 and self.todo.item(current,0) else None
+        scroll=self.todo.verticalScrollBar().value()
         previous=self.todo.blockSignals(True)
-        try:self._render_todo_rows(tasks)
+        try:
+            self._render_todo_rows(tasks)
+            for row in range(self.todo.rowCount()):
+                item=self.todo.item(row,4);task=item.data(Qt.ItemDataRole.UserRole+2)
+                if selected and task and (task[6],task[3],task[4])==(selected[6],selected[3],selected[4]) or not selected and group and self.todo.item(row,0).data(Qt.ItemDataRole.UserRole)==group:
+                    self.todo.setCurrentCell(row,4);break
+            self.todo.verticalScrollBar().setValue(scroll)
         finally:self.todo.blockSignals(previous)
+        self.show_todo_selection()
+
+    def show_todo_selection(self):
+        if not hasattr(self,'todo_process'):return
+        row=self.todo.currentRow();item=self.todo.item(row,4) if row>=0 else None;task=item.data(Qt.ItemDataRole.UserRole+2) if item else None
+        self.todo_process.setEnabled(item is not None)
+        if hasattr(self,'todo_detail'):
+            self.todo_detail.setEnabled(item is not None);self.todo_detail.setText('打开每日跟进' if task and task[6].startswith('daily:') else '查看 / 修改所属订单')
+        action='处理所选事项'
+        if task:
+            reason=task[4]
+            if task[6].startswith('daily:'):action='标记每日事项已处理'
+            elif '待确认加入计划总表' in reason:action='确认加入计划总表'
+            elif '合同' in reason:action='确认合同录入'
+            elif 'BOM' in reason:action='确认工程 BOM'
+            elif reason=='待确认分析':action='确认分析完成'
+            elif '包材信息' in reason:action='确认包材信息'
+            elif '到' in reason or '交期' in reason:action='填写交期 / 到料'
+        elif item:action='查看订单详情'
+        self.todo_process.setText(action)
+        if task:self.todo_selection.setText(f'{task[1]} / {task[3]}：{task[4]}')
+        elif item:self.todo_selection.setText('这是订单汇总行，点击“查看所属订单”查看详情；展开后可处理具体事项。')
+        else:self.todo_selection.setText('先选择一条待办，可查看完整事项并处理。')
+
+    def process_selected_todo(self):
+        row=self.todo.currentRow();item=self.todo.item(row,4) if row>=0 else None
+        if item is None:return
+        task=item.data(Qt.ItemDataRole.UserRole+2)
+        if task:self.confirm_todo(list(task))
+        else:self.open_selected_todo_detail()
+
+    def open_selected_todo_detail(self):
+        row=self.todo.currentRow();item=self.todo.item(row,0) if row>=0 else None
+        if item is None:return
+        identity=item.data(Qt.ItemDataRole.UserRole)
+        if identity.startswith('daily:'):
+            self.daily_date.setDate(QDate.fromString(identity[6:],'yyyy-MM-dd'));self.nav.setCurrentRow(3)
+        else:self.edit_order(self.by_id.get(identity))
 
     def _render_todo_rows(self, tasks):
         """待办清单：同一订单合并成一组，组头可展开 / 折叠，单击切换。"""
@@ -1648,13 +1831,8 @@ class MainWindow(QMainWindow):
             self.confirm_plan_join([dialog.order])
 
     def queue_analysis_check(self,order):
-        day=date.today().isoformat();records=self.store.daily(day);record=records.setdefault('分仓数据',{})
-        identities=record.setdefault('order_ids',[])
-        if order['id'] not in identities:identities.append(order['id'])
-        text=order['number']+' 分析已确认，请在外部系统刷新分仓并检查异常'
-        notes=record.get('notes','')
-        if text not in notes:record['notes']=(notes+'；'+text).strip('；')
-        record['state']='需要跟进';record['updated_at']=datetime.now().isoformat(timespec='seconds');self.store.save_daily(day,records)
+        from .edit_history import analysis_followup
+        day=date.today().isoformat();self.store.save_daily(day,analysis_followup(order,self.store.daily(day)))
         if self.current_daily_day==day:self.load_daily()
 
     def follow_order_daily(self,order):
@@ -1734,11 +1912,13 @@ class MainWindow(QMainWindow):
             return
         self.status.showMessage(f"已新增 {len(orders)} 个订单", 5000)
         self.confirm_plan_join(orders)
-        if dialog.export_after:
-            self.write_plan(orders, serials)
-        else:
-            QMessageBox.information(self, "导入完成",
-                                    f"已登记 {len(orders)} 个订单。加入情况可在计划总表查看，未完成事项在今日待办中继续处理。")
+        self.nav.setCurrentRow(1)
+        self.order_management_page.search.setText(orders[0]['number'] if len(orders)==1 else '')
+        self.order_management_page.refresh()
+        ids={order['id'] for order in orders};table=self.order_management_page.table
+        for row in range(table.rowCount()):
+            if table.item(row,0).data(Qt.ItemDataRole.UserRole) in ids:table.setCurrentCell(row,0);table.scrollToItem(table.item(row,0));break
+        self.status.showMessage(f"已导入 {len(orders)} 个订单、{sum(len(o['items']) for o in orders)} 个型号，并定位到订单管理；未完成事项保留在今日待办。",12000)
 
     def write_plan(self, orders, serials=None):
         default_name = f"计划总表导入_{orders[0]['number']}_{date.today():%Y%m%d}.xlsx"
@@ -1850,7 +2030,9 @@ class MainWindow(QMainWindow):
                 self.status.showMessage('关联订单号未登记：'+'、'.join(missing),7000);return
             payload[key]['order_ids']=list(dict.fromkeys(lookup[n] for n in numbers))
         try:
+            snapshot=self.edit_history.capture(days=[self.current_daily_day])
             self.store.save_daily(self.current_daily_day, payload)
+            self.edit_history.record('每日跟进 '+self.current_daily_day,snapshot)
             self.refresh()
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
@@ -1859,6 +2041,7 @@ class MainWindow(QMainWindow):
             self.status.showMessage(f"已保存 {self.current_daily_day} 的跟进记录", 5000)
 
     def tick(self):
+        if self.quitting:return
         self.refresh()
         now = datetime.now()
         due = [(order, reminders(order, now)) for order in self.store.orders()]
@@ -1936,6 +2119,10 @@ class MainWindow(QMainWindow):
     def update_error(self, message):
         self.update_button.setEnabled(True)
         self.update_status.setText("更新未完成：" + message)
+
+    def open_update_log(self):
+        updater.log_update('log_opened')
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(updater.log_path())))
 
     def release_ready(self, release):
         self.update_button.setEnabled(True)

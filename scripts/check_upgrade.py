@@ -20,7 +20,7 @@ from workbench.updater import launch_replacement
 
 def main():
     INSTALL.mkdir(parents=True,exist_ok=True)
-    source=ROOT/"dist"/"OrderFollowup.exe"
+    source=Path(sys.argv[2]).resolve() if len(sys.argv)>2 else ROOT/"dist"/"OrderFollowup.exe"
     target=INSTALL/"OrderFollowup.exe"
     old_exe=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else source
     shutil.copy2(old_exe,target)

@@ -2,6 +2,7 @@
 import copy
 from openpyxl.utils.cell import coordinate_to_tuple
 from .planbook import edit_cell
+from .plan_layout import merge_ranges
 
 
 def remove_model(order, item_id):
@@ -33,7 +34,9 @@ def detach_plan(payload, order_id, item_ids, clear_rows=False):
         for sheet in result['sheets']:
             rows = {row for name, row in affected if name == sheet['name']}
             for address, cell in list(sheet['cells'].items()):
-                if coordinate_to_tuple(address)[0] in rows and 'f' not in cell:
+                row,col=coordinate_to_tuple(address)
+                shared=any(left<=col<=right and top<=row<=bottom and not set(range(top,bottom+1))<=rows for left,top,right,bottom in merge_ranges(sheet))
+                if row in rows and 'f' not in cell and not shared:
                     edit_cell(sheet, address, '')
         if affected:
             for sheet in result['sheets']:

@@ -1,9 +1,12 @@
 """导入原单的完整明细与原件；计划表加入仍单独预览确认。"""
 import copy,base64,hashlib
 from pathlib import Path
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt,QTimer,QSignalBlocker
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,
  QHeaderView,QAbstractItemView,QLabel,QFileDialog,QMessageBox)
+from .inline_edit import enable_cell_editing,update_order_value
+from .format_controls import ViewFormatting,FormatBar
+from .ux_controls import FormatToggle
 
 HEADERS=['订单号','公司型号','物料编码','产品数量','产品要求','单位','客户编号','客户','经办人','接单日期','交期',
          '订单属性','运输方式','产品大类','客户型号','原单包材','原单BOM状态','原单文件','跟进状态']
@@ -47,14 +50,15 @@ class OrderManagementWidget(QWidget):
             b=QPushButton(text);b.clicked.connect(fn);edit_row.addWidget(b);self.selection_buttons.append(b)
             if text.startswith('删除'):b.setObjectName('danger')
         edit_row.addStretch();trash=QPushButton('回收站');trash.clicked.connect(self.open_trash);edit_row.addWidget(trash);box.addLayout(edit_row)
-        self.search=QLineEdit();self.search.setAcceptDrops(False);self.search.setPlaceholderText('搜索订单号、客户、型号、物料编码、产品要求……');self.search.textChanged.connect(self.refresh);box.addWidget(self.search)
+        self.search=QLineEdit();self.search.setAcceptDrops(False);self.search.setClearButtonEnabled(True);self.search.setPlaceholderText('搜索订单号、客户、型号、物料编码、产品要求……');self.search.textChanged.connect(self.refresh);search_row=QHBoxLayout();search_row.addWidget(self.search,1);box.addLayout(search_row)
         self.table=QTableWidget(0,len(HEADERS));self.table.setHorizontalHeaderLabels(HEADERS);self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers);self.table.setAlternatingRowColors(True);self.table.setAcceptDrops(False);self.table.viewport().setAcceptDrops(False)
+        enable_cell_editing(self.table);self.table.setAlternatingRowColors(False);self.table.setAcceptDrops(False);self.table.viewport().setAcceptDrops(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         for c in range(len(HEADERS)):self.table.setColumnWidth(c,125)
         self.table.setColumnWidth(2,190);self.table.setColumnWidth(3,90);self.table.setColumnWidth(4,360);self.table.setColumnWidth(5,60)
-        self.table.cellDoubleClicked.connect(lambda r,c:self.open_selected());box.addWidget(self.table,1)
+        self.formatter=ViewFormatting(self.table,main,'orders');self.format_bar=FormatBar(self.formatter,self);self.format_toggle=FormatToggle(self.format_bar,main.store,'orders',self);search_row.addWidget(self.format_toggle);box.addWidget(self.format_bar)
+        self.table.itemChanged.connect(self.inline_changed);box.addWidget(self.table,1)
         self.status=QLabel();box.addWidget(self.status)
         self.relations=QLabel('选择订单可查看合同、BOM、分析、计划行及关联异常。');self.relations.setWordWrap(True);box.addWidget(self.relations)
         self.table.itemSelectionChanged.connect(self.show_relations)
@@ -77,8 +81,13 @@ class OrderManagementWidget(QWidget):
     def dropEvent(self,event):self.main.dropEvent(event)
 
     def refresh(self,*args):
+        if self.table.state()==QAbstractItemView.State.EditingState:return
         selected=self.selected();selected_id=selected['id'] if selected else None
         item=self.selected_item();item_id=item['id'] if item else None
+        selected_column=self.table.currentColumn()
+        selected_ranges=self.table.selectedRanges()
+        scroll=(self.table.verticalScrollBar().value(),self.table.horizontalScrollBar().value())
+        blocker=QSignalBlocker(self.table)
         self.table.setRowCount(0);text=self.search.text().strip().lower();orders=self.main.store.orders()
         for order in orders:
             for item in order['items']:
@@ -89,11 +98,44 @@ class OrderManagementWidget(QWidget):
                 if text and text not in ' '.join(map(str,values)).lower():continue
                 r=self.table.rowCount();self.table.insertRow(r)
                 for c,v in enumerate(values):
-                    cell=QTableWidgetItem(str(v));cell.setToolTip(str(v));cell.setData(Qt.ItemDataRole.UserRole,order['id']);cell.setData(Qt.ItemDataRole.UserRole+1,item['id']);self.table.setItem(r,c,cell)
-        self.status.setText(f'已登记 {len(orders)} 个订单，当前显示 {self.table.rowCount()} 条型号明细。选择一行可编辑型号或整单；双击查看订单详情。')
+                    cell=QTableWidgetItem(str(v));cell.setToolTip(str(v));cell.setData(Qt.ItemDataRole.UserRole,order['id']);cell.setData(Qt.ItemDataRole.UserRole+1,item['id']);cell.setData(Qt.ItemDataRole.UserRole+3,str(v))
+                    if c>=17:cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self.table.setItem(r,c,cell)
+        self.status.setText(f'已登记 {len(orders)} 个订单，当前显示 {self.table.rowCount()} 条型号明细。单击选择，直接键入替换；双击或 F2 编辑原内容，Esc 取消。')
         for r in range(self.table.rowCount()):
-            if self.table.item(r,0).data(Qt.ItemDataRole.UserRole)==selected_id and self.table.item(r,0).data(Qt.ItemDataRole.UserRole+1)==item_id:self.table.setCurrentCell(r,0);break
+            if self.table.item(r,0).data(Qt.ItemDataRole.UserRole)==selected_id and self.table.item(r,0).data(Qt.ItemDataRole.UserRole+1)==item_id:self.table.setCurrentCell(r,max(0,selected_column));break
+        self.table.verticalScrollBar().setValue(scroll[0]);self.table.horizontalScrollBar().setValue(scroll[1])
+        for area in selected_ranges:
+            if area.bottomRow()<self.table.rowCount():self.table.setRangeSelected(area,True)
+        self.formatter.apply_saved()
         self.show_relations()
+
+    def inline_changed(self,cell):
+        if cell.column()>=17:return
+        old=cell.data(Qt.ItemDataRole.UserRole+3)
+        if old is None or cell.text()==old:return
+        order=next((o for o in self.main.store.orders() if o['id']==cell.data(Qt.ItemDataRole.UserRole)),None)
+        if order is None:return
+        item_id=cell.data(Qt.ItemDataRole.UserRole+1)
+        fields=[(False,'number'),(True,'model'),(True,'material_code'),(True,'quantity'),(True,'requirement'),(True,'unit'),
+                (False,'customer_no'),(False,'customer'),(False,'owner'),(False,'received_at'),
+                (False,'plan_delivery_date' if order.get('plan_delivery_date') else 'delivery_date'),
+                (False,'attribute'),(False,'transport'),(True,'category'),(True,'customer_model'),(True,'packaging_name'),(True,'bom_status')]
+        is_item,key=fields[cell.column()]
+        try:
+            history=getattr(self.main,'edit_history',None);snapshot=history.capture([order['id']]) if history else None
+            updated=update_order_value(order,item_id,key,cell.text(),is_item)
+            self.main.store.save_order(updated,'订单管理直接修改：'+HEADERS[cell.column()])
+            if history:history.record('订单管理：'+HEADERS[cell.column()],snapshot)
+        except Exception as exc:
+            with QSignalBlocker(self.table):cell.setText(old)
+            self.status.setText('未保存：'+('订单号已存在。' if 'UNIQUE' in str(exc) else str(exc)))
+            return
+        with QSignalBlocker(self.table):cell.setData(Qt.ItemDataRole.UserRole+3,cell.text())
+        def finish():
+            if getattr(self.main,'quitting',False):return
+            self.main.load_daily();self.main.refresh();self.main.status.showMessage('已保存订单修改；关联计划表的变化已列为待确认更新。',7000)
+        QTimer.singleShot(0,finish)
 
     def open_selected(self):
         o=self.selected()

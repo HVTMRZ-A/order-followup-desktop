@@ -46,10 +46,15 @@ class Store:
             if source is None:
                 self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(payload,ensure_ascii=False),))
             else:
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('planbook_revision',uid()))
                 self.db.execute('INSERT INTO planbook VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,source=excluded.source',(json.dumps(payload,ensure_ascii=False),source))
                 for order in self.orders():
                     order['plan_sync_checked']=False
                     self.db.execute('UPDATE orders SET payload=? WHERE id=?',(json.dumps(order,ensure_ascii=False),order['id']))
+            self._mark_plan_saved()
+
+    def _mark_plan_saved(self):
+        self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('planbook_saved_at',stamp()))
 
     def save_order(self, order, action="保存订单",require_plan_review=True,clear_removed_plan_ids=()):
         self.save_orders([order], action,require_plan_review=require_plan_review,clear_removed_plan_ids=clear_removed_plan_ids)
@@ -59,10 +64,51 @@ class Store:
         with self.db:
             if payload is not None:
                 self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(payload,ensure_ascii=False),))
+                self._mark_plan_saved()
             for order in orders:
                 order['updated_at']=stamp()
                 self.db.execute('UPDATE orders SET payload=? WHERE id=?',(json.dumps(order,ensure_ascii=False),order['id']))
                 self.db.execute('INSERT INTO audit(at,order_id,action) VALUES(?,?,?)',(stamp(),order['id'],'确认加入计划总表 / 更新待办'))
+
+    def save_plan_edit(self, payload, orders=(), action='计划总表直接修改', daily=None):
+        from .order_changes import refresh_overrides
+        for order in orders:
+            validate_order(order)
+            previous=self.db.execute('SELECT payload FROM orders WHERE id=?',(order['id'],)).fetchone()
+            if previous is None:raise ValueError('关联订单已不存在，请刷新后重试。')
+            refresh_overrides(json.loads(previous[0]),order)
+            order['plan_sync_checked']=False
+            order['updated_at']=stamp()
+        with self.db:
+            self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(payload,ensure_ascii=False),))
+            self._mark_plan_saved()
+            for order in orders:
+                self.db.execute('UPDATE orders SET number=?,payload=? WHERE id=?',
+                                (order['number'],json.dumps(order,ensure_ascii=False),order['id']))
+                self.db.execute('INSERT INTO audit(at,order_id,action) VALUES(?,?,?)',(stamp(),order['id'],action))
+            for day, records in (daily or {}).items():
+                self.db.execute('INSERT OR REPLACE INTO daily VALUES(?,?)',(day,json.dumps(records,ensure_ascii=False)))
+
+    def table_format(self,name):return json.loads(self.get('table_format_'+name,'{}'))
+
+    def save_table_format(self,name,payload):self.set('table_format_'+name,json.dumps(payload,ensure_ascii=False))
+
+    def apply_history(self, orders, plan, daily, action, views=None):
+        from .order_changes import refresh_overrides
+        with self.db:
+            for order in orders:
+                previous=self.db.execute('SELECT payload FROM orders WHERE id=?',(order['id'],)).fetchone()
+                if previous is None:raise ValueError('订单已移除，撤销未执行。')
+                refresh_overrides(json.loads(previous[0]),order)
+                self.db.execute('UPDATE orders SET number=?,payload=? WHERE id=?',(order['number'],json.dumps(order,ensure_ascii=False),order['id']))
+                self.db.execute('INSERT INTO audit(at,order_id,action) VALUES(?,?,?)',(stamp(),order['id'],action))
+            if plan is not None:
+                self.db.execute('UPDATE planbook SET payload=? WHERE id=1',(json.dumps(plan,ensure_ascii=False),));self._mark_plan_saved()
+            for day, records in daily.items():
+                self.db.execute('INSERT OR REPLACE INTO daily VALUES(?,?)',(day,json.dumps(records,ensure_ascii=False)))
+            for name,payload in (views or {}).items():
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('table_format_'+name,json.dumps(payload,ensure_ascii=False)))
+            if not orders:self.db.execute('INSERT INTO audit(at,order_id,action) VALUES(?,?,?)',(stamp(),None,action))
 
     def save_orders(self, orders, action="批量导入",require_plan_review=True,clear_removed_plan_ids=()):
         for order in orders:
@@ -92,6 +138,7 @@ class Store:
                                 (stamp(), snapshot['order']['id'], '编辑订单时移除型号至回收站：' + model))
             if removals and plan is not None:
                 self.db.execute('UPDATE planbook SET payload=? WHERE id=1', (json.dumps(plan, ensure_ascii=False),))
+                self._mark_plan_saved()
             for order in orders:
                 previous = self.db.execute('SELECT payload FROM orders WHERE id=?', (order['id'],)).fetchone()
                 if previous:
@@ -139,6 +186,7 @@ class Store:
                         self.db.execute('UPDATE daily SET payload=? WHERE day=?', (json.dumps(records, ensure_ascii=False), day))
             if payload is not None:
                 self.db.execute('UPDATE planbook SET payload=? WHERE id=1', (json.dumps(payload, ensure_ascii=False),))
+                self._mark_plan_saved()
             model = next((i['model'] for i in order['items'] if i['id'] == item_id), '')
             action = f'移入回收站：型号 {model}' if item_id else '整单移入回收站'
             if clear_plan_rows:
@@ -214,6 +262,7 @@ class Store:
 
     def export_json(self, target):
         content = {"format": "order-followup-backup-v1", "orders": self.orders(), "daily": self.daily_all(),
+                   "table_formats":{name:self.table_format(name) for name in ('orders','materials')},
                    "audit": list(self.db.execute("SELECT at,order_id,action FROM audit")),
                    "order_trash": list(self.db.execute('SELECT id,deleted_at,payload,restored_at FROM order_trash'))}
         if self.planbook():content['planbook']={'payload':self.planbook(),'source':base64.b64encode(self.planbook_source()).decode('ascii')}
@@ -253,11 +302,16 @@ class Store:
             ledger_source=base64.b64decode(ledger['source'],validate=True)
         with self.db:
             self.db.execute("DELETE FROM orders")
+            self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('data_revision',uid()))
+            for name in ('orders','materials'):
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('table_format_'+name,json.dumps(content.get('table_formats',{}).get(name,{}),ensure_ascii=False)))
             self.db.execute("DELETE FROM daily")
             self.db.execute("DELETE FROM audit")
             self.db.execute('DELETE FROM planbook')
             self.db.execute('DELETE FROM order_trash')
-            if ledger:self.db.execute('INSERT INTO planbook VALUES(1,?,?)',(json.dumps(ledger['payload'],ensure_ascii=False),ledger_source))
+            if ledger:
+                self.db.execute('INSERT INTO planbook VALUES(1,?,?)',(json.dumps(ledger['payload'],ensure_ascii=False),ledger_source));self._mark_plan_saved()
+            else:self.db.execute('DELETE FROM settings WHERE key=?',('planbook_saved_at',))
             for order in content["orders"]:
                 self.db.execute("INSERT INTO orders VALUES(?,?,?)", (order["id"], order["number"], json.dumps(order, ensure_ascii=False)))
             for day, payload in content["daily"]:
